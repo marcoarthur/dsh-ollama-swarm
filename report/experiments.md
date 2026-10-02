@@ -1,8 +1,8 @@
-# Experimento: Ollama local + Qwen3 + DeepSeek Harness
+# Experimento: Ollama local + modelos Qwen + DeepSeek Harness
 
 **Data:** 2026-10-02
 **Máquina:** Linux x86_64, **sem GPU** — inferência 100% em CPU
-**Status:** inconclusivo em duas rodadas iniciais, **conclusivo** na rodada final (ver §6)
+**Status:** inconclusivo em duas rodadas iniciais, **conclusivo** na rodada final (ver §6); adendo sobre `qwen2.5-coder:7b` em §14
 
 ---
 
@@ -10,18 +10,19 @@
 
 A pergunta era: *"o agente usa ferramentas, ou só responde com texto?"*
 
-**Resposta: usa.** O modelo emite `tool_calls` corretamente e rápido. O que existia eram **dois defeitos distintos**, que durante a investigação foram confundidos entre si:
+**Resposta: usa.** O modelo emite `tool_calls` corretamente e rápido. O que existia eram **três defeitos distintos**, que durante a investigação foram confundidos entre si:
 
 | # | Defeito | Natureza | Situação |
 |---|---------|----------|----------|
 | 1 | O modelo não emitia **nenhuma** tool call | Ordem das mensagens no harness | **Corrigido e comprovado** (`includeRuntimeContext: false`) |
 | 2 | O modelo emitia tool call e entrava em **loop degenerado** | Patologia do modelo 8B + falta de teto duro | **Diagnosticado, não corrigido** |
+| 3 | `qwen2.5-coder:7b` emite tool call **como texto**, nada executa | Formato de tool call não suportado pela série Coder | **Diagnosticado; ver §14** |
 
 A conclusão errada que assumi no meio do caminho — *"o modelo local é incapaz"* — está demonstrada como falsa pelos dados da §6.
 
 **Veredito sobre o harness:** o DeepSeek Harness suporta providers locais OpenAI-compatible como funcionalidade de primeira classe, documentada. Não é marketing nem caminho não suportado.
 
-**Veredito sobre o modelo:** `qwen3:8b` é capaz de iniciar uma tarefa com ferramenta corretamente na primeira tentativa, mas degenera em laço infinito em tarefas que exigem verificação. Nesse regime, não é adequate como agente builder autônomo em CPU.
+**Veredito sobre o modelo:** `qwen3:8b` é capaz de iniciar uma tarefa com ferramenta corretamente na primeira tentativa, mas degenera em laço infinito em tarefas que exigem verificação. Nesse regime, não é adequado como agente builder autônomo em CPU. Já o `qwen2.5-coder:7b` **não é utilizável** com o harness, por incompatibilidade de formato (§14).
 
 ---
 
@@ -501,3 +502,98 @@ Registrado para não ser confundido com conclusão:
 | `…/dsh-sandbox-policy` | modos de sandbox, incluindo `read-only` |
 
 Ferramentas de diagnóstico usadas durante a investigação (fora do repositório): proxy de logging HTTP para capturar a requisição real, driver CDP para inspecionar o DOM da UI, script de replay com `temperature: 0`.
+
+---
+
+## 14. Adendo — `qwen2.5-coder:7b` (mesmo dia, ~19h)
+
+Registrado depois do commit inicial. O usuário trocou o modelo do perfil para `qwen2.5-coder:7b` e relatou: *"não salva nada, não usa tooling, só responde via texto"*.
+
+**A observação estava correta, e a causa é o modelo — não o harness, não a configuração.**
+
+### 14.1 Sintoma
+
+A sessão `0974f5ed` (workspace default, 19:23) tem 8 tool calls — `web_fetch`×4, `web_search`×3, `workflow`×1 — e **zero `write`, `read`, `bash` ou `edit`**. A tarefa era criar um app Mojolicious em Perl.
+
+### 14.2 Prova: A/B controlado dentro da mesma sessão
+
+A sessão trocou de modelo no meio, o que produz uma comparação limpa: mesmo harness, mesma config, mesmo endpoint, mesmos schemas de tool.
+
+| Faixa (seq) | Modelo | Tool calls |
+|---|---|---|
+| 49–149 | `qwen3:8b` | **8 estruturadas** — `web_fetch`×4, `web_search`×3, `workflow`×1. Todas executaram. |
+| 163–211 | `qwen2.5-coder:7b` | **0 estruturadas**, 9 objetos JSON de tool call **como texto** |
+
+O texto cru do coder (seq 195), que ele *queria* executar:
+
+```
+{
+  "name": "write",
+  "arguments": {
+    "file_path": "/home/itaipu/Projects/Agentes/hello.pl",
+    "content": "use Mojolicious::Lite;\nuse strict; use warnings;\n..."
+  }
+}
+```
+
+Argumentos corretos, caminho correto, código Mojolicious válido. Ele sabe escrever o arquivo; não sabe **pedir** para escrever.
+
+Contagem no texto das respostas do coder:
+
+| Padrão | Ocorrências |
+|---|---|
+| `<tool_call>` | **0** |
+| cercas ` ```json ` | 4 |
+| `"name"` (JSON de tool call) | 9 |
+
+O template do `qwen2.5-coder:7b` no Ollama **exige** `<tool_call>…</tool_call>` e diz explicitamente *"Do not include any backticks or ```json"*. O modelo ignora. O parser do Ollama não encontra a tag, então devolve tudo como `content` com `finish_reason: "stop"` — indistinguível de uma resposta em prosa.
+
+Em uma das tentativas (seq 179) o modelo emitiu o **placeholder de um exemplo de template** como argumento real: `"file_path": "caminho/para/o/arquivo.txt", "content": "Conteúdo do arquivo"`. Sintoma adicional de baixa aderência ao formato.
+
+### 14.3 É limitação conhecida e documentada do modelo
+
+Cinco fontes independentes, mesmo sintoma:
+
+- **[vLLM parser repo](https://github.com/hanXen/vllm-qwen2.5-coder-tool-parser):** *"Qwen2.5-Coder models do not use the hermes `<tool_call>` format. This means tool calling fails silently — the model outputs tool calls in a different format that vLLM cannot parse."* E: *"hermes-style `<tool_call>` prompting is ignored by the model (60% code blocks + 40% plain JSON)."*
+- **[hermes-agent #5867](https://github.com/NousResearch/hermes-agent/issues/5867):** *"tool calls are returned as a JSON string in the content field rather than as a structured tool_calls array. This causes Hermes to treat the response as a regular text reply and never actually execute the tools."*
+- **[thClaws #50](https://github.com/thClaws/thClaws/issues/50):** *"qwen2.5-coder leaks tool-call JSON as plain text via Ollama provider"* — e a correção sugerida inclui *"a docs note that qwen2.5-coder is incompatible with the agent loop"*.
+- **[Reddit r/ollama](https://www.reddit.com/r/ollama/comments/1j30893/):** *"Qwen2.5 will start putting its tool calls (JSON) in the content instead of the proper tool_calls part of the JSON."*
+- **[vLLM #29192](https://github.com/vllm-project/vllm/issues/29192):** mesmo padrão.
+
+A frase que resume: *"Function calling works with Qwen2.5 (non-Coder) but fails on Qwen2.5-Coder."* A série Coder não foi treinada no formato de tool call dos instruct.
+
+### 14.4 O que NÃO é a causa
+
+- **`includeRuntimeContext` continua funcionando.** Só 2 mensagens de contexto em 24 (`seq` 9 e 98). A correção da §4.4 está ativa.
+- **O harness está correto.** O `qwen3:8b` fez tool calls estruturadas na mesma sessão, com os mesmos schemas.
+- **O template do Ollama está correto.** Tem o bloco `<tool_call>` completo. O modelo é que não o segue.
+- **O `compat` de 24 campos do `dsh-llm-pi-ai` não tem opção para isso.** Não existe campo para extrair tool call do `content`.
+
+### 14.5 Problemas adicionais encontrados
+
+**1. `web_search` quebrado no setup local.** As 3 chamadas falharam com:
+
+```
+Error: DeepSeek search has no API key for "DEEPSEEK_API_KEY"
+```
+
+O provider de busca está roteado para o DeepSeek, sem credencial. Independente do modelo. O `web_fetch` funcionou, mas o modelo apontou para URLs do GitHub que retornaram 404 — achou que o projeto era um repositório remoto.
+
+**2. O Swarm amplifica a falha.** Das 19 mensagens de usuário, **14 são a tarefa `"swarm spawn a swarm:"` repetida**. O orquestrador reenvia a tarefa para cada papel; como o modelo não conclui, ele repete. Modelo quebrado × laço de swarm = 14 tentativas da mesma tarefa.
+
+**3. `qwen3:8b` foi removido do Ollama.** Só restou `qwen2.5-coder:7b`. O perfil declara apenas ele, e o roster do Swarm está em *"inherit deployment default"* — os 4 papéis herdaram o coder.
+
+### 14.6 Opções (nenhuma aplicada)
+
+| Opção | Avaliação |
+|---|---|
+| **Voltar a um Qwen não-Coder** (`qwen3:8b`, `qwen2.5:7b-instruct`) | **Comprovado nesta sessão.** Emitem `<tool_call>` nativamente. |
+| `qwen3-coder` | Usa formato XML e precisa de parser `qwen3_coder`; provavelmente falha no Ollama padrão. |
+| Fallback parser no cliente | Foi o que o Hermes fez (PR #26353). O pi-ai do DSH **não tem**. |
+| Hack no template do Ollama | Reescrever o formato no Modelfile. Um relato diz funcionar trocando `<tool_call>` por `[tool_call]`; frágil e não determinístico. |
+
+**Conclusão:** a série Qwen2.5-Coder é incompatível com agent loops que dependem de tool calls estruturadas. É bom em código e ruim em agir. A opção confiável é um modelo não-Coder.
+
+### 14.7 Como isso foi verificado (sem inferência)
+
+Toda a §14 veio de leitura: transcript da sessão em `~/.dsh/sessions/…/session.v4.jsonl.zstd`, template do modelo via `ollama show`, config composta via `dsh --dump-config`, DOM da UI via CDP, e fontes públicas. **Nenhuma geração foi executada** — a máquina se manteve fria. O A/B dentro da própria sessão substituiu a necessidade de rodar o modelo de novo.
