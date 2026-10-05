@@ -52,19 +52,12 @@ if (!defaultDutyTable) {
 
 const PINNED = ['architect', 'builder', 'reviewer', 'integrator']
 
-// Ferramentas por papel (toolFilter.allow). Os schemas das 33 tools do
-// host custam ~7k tokens por requisição — com contexto de 16k sobravam
-// ~5,7k para o trabalho e o Builder estourava a janela no 2º arquivo
-// (relatório §16). Estas listas cabem em ~2k tokens. Sempre aplicadas
-// aos papéis built-in: editar aqui, não no dashboard.
-const BUILD_TOOLS = ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'todo_write', 'swarm_report']
-const TOOL_FILTERS = {
-  architect: BUILD_TOOLS,
-  builder: BUILD_TOOLS,
-  integrator: BUILD_TOOLS,
-  // O revisor só inspeciona e roda checagens; não escreve.
-  reviewer: ['read', 'bash', 'glob', 'grep', 'swarm_report'],
-}
+// Sem toolFilter nos papéis: no DSH 0.2.0-rc.2 o plugin valida a lista
+// contra as tools GLOBAIS (tools.view() sem escopo), mas read/write/bash/…
+// são registradas pelo preset do agente. Ele descarta essas como
+// "desconhecidas" e o agente fica só com swarm_report + subagent — sem
+// como escrever nada, entra em laço (relatório §17). O seed remove
+// qualquer toolFilter dos papéis built-in.
 
 // Base: o default do plugin, para todo papel sempre nascer completo.
 const base = defaultDutyTable()
@@ -106,7 +99,10 @@ for (const id of PINNED) {
     role.persona = base.roles[id].persona
     console.log(`  ${id}: persona com sandbox_permissions restaurada ao default do plugin`)
   }
-  role.toolFilter = { allow: [...TOOL_FILTERS[id]] }
+  if (role.toolFilter !== undefined) {
+    delete role.toolFilter
+    console.log(`  ${id}: toolFilter removido (quebra as tools do preset; ver relatório §17)`)
+  }
 }
 
 // Preserva a trava manual do dashboard (override.enabled), que o
@@ -129,5 +125,5 @@ renameSync(tmp, file)
 console.log(`Roster semeado em ${file}`)
 for (const id of PINNED) {
   const r = table.roles[id]
-  console.log(`  ${id}: ${r?.provider ?? '(inherit)'}/${r?.model ?? '-'}  tools: ${r?.toolFilter?.allow?.length ?? 'todas'}`)
+  console.log(`  ${id}: ${r?.provider ?? '(inherit)'}/${r?.model ?? '-'}`)
 }

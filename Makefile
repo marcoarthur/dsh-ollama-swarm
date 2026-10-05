@@ -84,6 +84,13 @@ WEB_PORT       := 3080
 WORKSPACE      := $(HOME)/Documents/dsh
 WS_ARCHIVE     := $(DSH_HOME)/workspace-archive
 
+# Trava térmica (relatório §17): acima destes limites o vigia encerra o
+# runner do Ollama e o DSH na hora. CPU crítica = 100 °C; a GPU reduz
+# clock em 94 °C.
+THERMAL_GUARD  := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))scripts/thermal-guard.sh)
+CPU_MAX        := 90
+GPU_MAX        := 85
+
 # Inferência em CPU usa todos os núcleos: os alvos de teste rodam
 # com nice/ionice e nunca em paralelo.
 TOOLS_TIMEOUT  := 300
@@ -99,7 +106,8 @@ SWARM_VERSION  := 0.6.30
 
 .PHONY: help check-prereqs install-dsh ensure-model install-swarm \
         install config-ollama config-provider config-roster config start \
-        verify test test-dsh test-tools status clean clean-workspace setup
+        verify test test-dsh test-tools status clean clean-workspace setup \
+        thermal-watch thermal-status
 
 # ------------------------------------------------------------
 # Help
@@ -111,7 +119,9 @@ help:
 	@echo "  make install      Instala DSH + Swarm + garante o modelo"
 	@echo "  make config       Fixa o contexto do Ollama, escreve o provider e o Roster"
 	@echo "  make config-ollama  Fixa OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW) (sudo se mudar)"
-	@echo "  make start        Inicia o DSH Web em http://127.0.0.1:$(WEB_PORT)"
+	@echo "  make start        Inicia o DSH Web em http://127.0.0.1:$(WEB_PORT) com a trava térmica"
+	@echo "  make thermal-watch  Vigia a temperatura; acima de CPU $(CPU_MAX)°C / GPU $(GPU_MAX)°C mata Ollama e DSH"
+	@echo "  make thermal-status Mostra as temperaturas e os limites"
 	@echo "  make verify       Verifica instalação (falha se algo essencial faltar)"
 	@echo "  make test         Testa geração via API OpenAI-compatible"
 	@echo "  make test-tools   Testa se o agente USA ferramentas (1 exec, nice)"
@@ -416,12 +426,27 @@ config: config-ollama config-provider config-roster
 #
 # Nenhuma variável de ambiente é necessária: a credencial do
 # Ollama vive em $(CREDENTIALS).
+#
+# Sobe a trava térmica em paralelo e a derruba quando o DSH sai: este
+# notebook passou de 100 °C numa corrida de 16 min (relatório §17).
 # ------------------------------------------------------------
 start:
 	@echo "==> Iniciando DSH Web..."
 	@echo "    http://127.0.0.1:$(WEB_PORT)"
+	@echo "    trava térmica: CPU $(CPU_MAX)°C · GPU $(GPU_MAX)°C (log em $(DSH_HOME)/thermal-guard.log)"
 	@echo ""
-	@dsh web --port $(WEB_PORT)
+	@CPU_MAX=$(CPU_MAX) GPU_MAX=$(GPU_MAX) "$(THERMAL_GUARD)" watch & guard=$$!; \
+	trap 'kill $$guard 2>/dev/null' EXIT INT TERM; \
+	dsh web --port $(WEB_PORT)
+
+# ------------------------------------------------------------
+# Trava térmica avulsa (para experimentos rodados fora do make start)
+# ------------------------------------------------------------
+thermal-watch:
+	@CPU_MAX=$(CPU_MAX) GPU_MAX=$(GPU_MAX) "$(THERMAL_GUARD)" watch
+
+thermal-status:
+	@CPU_MAX=$(CPU_MAX) GPU_MAX=$(GPU_MAX) "$(THERMAL_GUARD)" status
 
 # ------------------------------------------------------------
 # Verify — retorna erro se algo essencial falhar
@@ -470,8 +495,8 @@ verify:
 			|| { echo "   ERRO: Roster do Swarm não fixado em ollama/$(MODEL) em $(DUTY_TABLE)"; ok=0; }; \
 		jq -e '[.roles[]?.persona // "" | select(contains("sandbox_permissions"))] | length == 0' "$(DUTY_TABLE)" >/dev/null 2>&1 \
 			|| { echo "   ERRO: persona do Swarm manda passar sandbox_permissions (rode make config-roster)"; ok=0; }; \
-		jq -e '[.roles | to_entries[]? | select(.key | test("^(architect|builder|reviewer|integrator)$$")) | select((.value.toolFilter.allow | type) == "array")] | length == 4' "$(DUTY_TABLE)" >/dev/null 2>&1 \
-			|| { echo "   ERRO: papéis do Swarm sem toolFilter — os schemas de todas as tools enchem o contexto (rode make config-roster)"; ok=0; }; \
+		jq -e '[.roles[]? | select(.toolFilter != null)] | length == 0' "$(DUTY_TABLE)" >/dev/null 2>&1 \
+			|| { echo "   ERRO: papel do Swarm com toolFilter — no DSH 0.2.0-rc.2 isso tira read/write/bash do agente (relatório §17; rode make config-roster)"; ok=0; }; \
 	else \
 		echo "   AVISO: Roster do Swarm ausente (usa o padrão do deployment)"; \
 	fi; \

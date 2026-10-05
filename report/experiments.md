@@ -785,12 +785,12 @@ Agravantes:
 
 | Mudança | Onde |
 |---|---|
-| `toolFilter.allow` por papel: 8 tools para architect/builder/integrator, 5 para reviewer (sem escrita) | `scripts/seed-swarm-roster.mjs` |
+| ~~`toolFilter.allow` por papel~~ — **revertido**: quebrou os agentes (§17) | `scripts/seed-swarm-roster.mjs` |
 | O seed preserva `override` (a trava manual do dashboard), que antes descartava | `scripts/seed-swarm-roster.mjs` |
 | `make verify` exige `toolFilter` nos 4 papéis | `Makefile` |
 | `make clean-workspace`: **move** o conteúdo do workspace para `~/.dsh/workspace-archive/<data-hora>/`. Pede confirmação, ou `YES=1` | `Makefile` |
 
-O workspace foi arquivado em `~/.dsh/workspace-archive/20261005-181505/`. **O `toolFilter` ainda não foi aplicado ao duty table em uso:** exige o DSH parado (`make config-roster`).
+O workspace foi arquivado em `~/.dsh/workspace-archive/20261005-181505/`.
 
 ### 16.4 Medição: contexto de 32k na RTX 2080 (8 GB)
 
@@ -817,3 +817,65 @@ Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
 ```
 
 Com `CONTEXT_WINDOW := 32768` no Makefile (o `config-ollama` hoje só gerencia o tamanho do contexto).
+
+---
+
+## 17. Adendo — o `toolFilter` quebrou os agentes, e a CPU chegou a 100 °C (2026-10-05, ~18h20–18h37)
+
+### 17.1 O que aconteceu
+
+O `toolFilter` da §16 foi aplicado e o Truco rodou de novo (run criado no seq 361 do `events.jsonl`). Em ~16 minutos de inferência contínua, a CPU chegou a **100 °C** (limite crítico) em um núcleo e a 90–97 °C nos demais. O usuário abortou o run.
+
+Nenhum arquivo foi criado. O workspace terminou só com `.dsh-swarm/`. O Architect relatou ter criado o `PLAN.md`, que não existe.
+
+### 17.2 Causa: o filtro deixou os agentes sem ferramentas
+
+Nas 3 sessões do run, a lista de tools enviada ao modelo tinha **duas** entradas: `subagent` e `swarm_report`.
+
+| Sessão | Passos | Chamadas | Erros |
+|---|---|---|---|
+| `6e394a72` (Architect) | 4 | `subagent`×2, `bash`×1 | `subagent depth 2 exceeds maxDepth 1` ×2; `unknown tool "bash"` |
+| `d85311ec` (Builder, tent. 1) | 33 | `swarm_report`×18, `subagent`×13, `pwd`×1 | depth ×13 |
+| `359fbcaa` (Builder, tent. 2) | 79 | **`swarm_report`×74**, `subagent`×4 | depth ×4 |
+
+Sem `read`, `write` e `bash`, o modelo tentou delegar para subagentes (bloqueado por `maxSubagentDepth`) e depois entrou em laço. Postou 74 notas de progresso declarando *"all source files written successfully"* sem ter escrito nada.
+
+**Mecanismo, lido no código:**
+
+- O plugin valida o `toolFilter` contra `restrictableToolNames()`, que lê `tools.view()` **sem escopo**, ou seja, só a camada global de tools (`dsh-swarm-orchestrator/lib/service.js`, `toolFilterFor` / `sanitizeToolNames`).
+- No DSH 0.2.0-rc.2, `read`, `write`, `bash` e as demais são registradas pelo **preset do agente**, numa camada de ancestral, não na global. O próprio `dsh-tools` documenta isso em `view()`: *"Once presets moved them onto the agent plane they became an ANCESTOR contribution"*.
+- O sanitizador descartou essas 7 como "desconhecidas" e passou adiante `allow: ["swarm_report"]`. O `subagent` aparece porque é registrado na camada do próprio filho, que o filtro não atinge.
+
+**Erro de método meu:** recomendei e apliquei o filtro testando só o formato do JSON numa cópia do duty table, nunca o conjunto de tools que o agente realmente recebe. Um único run curto teria mostrado a lista com 2 entradas.
+
+**Revertido:** o seed agora **remove** o `toolFilter` dos papéis built-in, e o `make verify` falha se algum papel tiver um. Duty table corrigido com `make config-roster`; `verify` OK.
+
+### 17.3 Aquecimento
+
+- A máquina é um notebook (`chassis_type` 10, produto "Blade"). Pelo nome, uma RTX 2080 Max-Q; CPU e GPU de notebook costumam dividir o sistema de refrigeração, mas isso **não foi verificado** neste modelo.
+- O modelo estava 100% na GPU (16k, 34/34 camadas). A CPU esquentou mesmo assim. **Não foi medido** quanto veio do `llama-server`, do Chrome (com o dashboard do DSH aberto, que recebia um evento por nota de progresso) ou do calor da GPU passando para a CPU.
+- Depois do abort: 66–70 °C nos núcleos, GPU a 58 °C.
+- Já houve superaquecimento antes (§9.1). O fator comum é **inferência contínua por muitos minutos**. O laço da §17.2 transformou um run que deveria falhar rápido em 16 minutos de geração ininterrupta. O harness não tem teto duro de passos (§8.2), e o Swarm não detecta notas de progresso repetidas.
+
+### 17.4 Mitigações possíveis
+
+| Opção | Observação |
+|---|---|
+| Limitar a potência da GPU (`nvidia-smi -pl <watts>`) | Requer sudo; não verificado se o driver permite isso numa GPU Max-Q |
+| Base refrigerada / perfil de ventoinha mais agressivo | Fora do software |
+| Monitorar a temperatura durante runs e abortar acima de um limite | **Implementado** — ver §17.5 |
+| Runs curtos: tarefas pequenas, e não "execute tudo" | Reduz o tempo de inferência contínua |
+
+### 17.5 Trava térmica
+
+`scripts/thermal-guard.sh` lê a maior temperatura entre os núcleos (coretemp) e a da GPU (`nvidia-smi`). Limites: **CPU 90 °C** (crítico 100) e **GPU 85 °C** (a GPU reduz clock em 94). Ajustáveis por `CPU_MAX` / `GPU_MAX`.
+
+| Modo | Uso |
+|---|---|
+| `watch` | A cada 2 s; acima do limite encerra o runner do Ollama (`llama-server`) e o DSH (`node …/bin/dsh web`) e registra em `~/.dsh/thermal-guard.log`. O `make start` o sobe junto com o DSH; avulso: `make thermal-watch` |
+| `hook` | PreToolUse do Claude Code (`.claude/settings.json`): acima do limite devolve `{"continue": false}` e encerra o turno do agente |
+| `status` / `check` | Leitura; `make thermal-status` |
+
+Os processos são identificados pelo executável exato, nunca por texto na linha de comando. A primeira versão usava `pkill -f` e encerrou o shell do próprio agente duas vezes durante o teste, porque o comando citava "llama-server" e "dsh web". O mesmo teria acontecido com qualquer terminal ou editor do usuário. No Node 24 o `comm` do DSH aparece como `MainThread`, por isso o filtro usa o argv.
+
+**Testado** com o limite baixado para 50 °C: encerrou o `llama-server` real (ocioso) e um processo falso `node …/bin/dsh web`, sem tocar em mais nada. **Não testado:** um disparo real, com a máquina quente durante um run.
