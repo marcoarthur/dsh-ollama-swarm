@@ -52,9 +52,12 @@ ROSTER_SEED    := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))scripts/seed-swar
 
 OLLAMA_HOST    := http://127.0.0.1:11434
 OLLAMA_URL     := $(OLLAMA_HOST)/v1
-MODEL          := qwen3:8b
-MODEL_LABEL    := Qwen3 8B
-CONTEXT_WINDOW := 32768
+MODEL          := qwen3.5:9b
+MODEL_LABEL    := Qwen3.5 9B
+# Tem que bater com OLLAMA_CONTEXT_LENGTH do serviço ollama: pela API
+# OpenAI-compatible o Ollama ignora este valor e usa o próprio num_ctx
+# (padrão 4096), truncando o prompt em silêncio. Ver relatório §15.
+CONTEXT_WINDOW := 16384
 
 WEB_PORT       := 3080
 

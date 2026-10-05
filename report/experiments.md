@@ -2,7 +2,7 @@
 
 **Data:** 2026-10-02
 **Máquina:** Linux x86_64, **sem GPU** — inferência 100% em CPU
-**Status:** inconclusivo em duas rodadas iniciais, **conclusivo** na rodada final (ver §6); adendo sobre `qwen2.5-coder:7b` em §14
+**Status:** inconclusivo em duas rodadas iniciais, **conclusivo** na rodada final (ver §6); adendo sobre `qwen2.5-coder:7b` em §14; Swarm + truncamento de contexto do Ollama em §15
 
 ---
 
@@ -17,6 +17,7 @@ A pergunta era: *"o agente usa ferramentas, ou só responde com texto?"*
 | 1 | O modelo não emitia **nenhuma** tool call | Ordem das mensagens no harness | **Corrigido e comprovado** (`includeRuntimeContext: false`) |
 | 2 | O modelo emitia tool call e entrava em **loop degenerado** | Patologia do modelo 8B + falta de teto duro | **Diagnosticado, não corrigido** |
 | 3 | `qwen2.5-coder:7b` emite tool call **como texto**, nada executa | Formato de tool call não suportado pela série Coder | **Diagnosticado; ver §14** |
+| 4 | Swarm "conclui" sem criar arquivo nenhum | Ollama trunca o prompt para ~2k tokens (`num_ctx` 4096 padrão) | **Corrigido e comprovado** com `qwen3.5:9b` e `granite4.1:8b` (§15) |
 
 A conclusão errada que assumi no meio do caminho — *"o modelo local é incapaz"* — está demonstrada como falsa pelos dados da §6.
 
@@ -597,3 +598,151 @@ O provider de busca está roteado para o DeepSeek, sem credencial. Independente 
 ### 14.7 Como isso foi verificado (sem inferência)
 
 Toda a §14 veio de leitura: transcript da sessão em `~/.dsh/sessions/…/session.v4.jsonl.zstd`, template do modelo via `ollama show`, config composta via `dsh --dump-config`, DOM da UI via CDP, e fontes públicas. **Nenhuma geração foi executada** — a máquina se manteve fria. O A/B dentro da própria sessão substituiu a necessidade de rodar o modelo de novo.
+
+---
+
+## 15. Adendo — Swarm conclui sem criar arquivos (2026-10-05)
+
+Ambiente mudou desde §2: agora há uma **RTX 2080 de 8 GB**, Ollama 0.34.3, DSH 0.2.0-rc.2, `dsh-swarm-orchestrator` 0.6.30, modelos `qwen3.5:9b` e `granite4.1:8b`, workspace `/home/itaipu/Documents/dsh`.
+
+### 15.1 Sintoma
+
+O Swarm executa os papéis, reporta `run/completed` e o resumo afirma que a tarefa foi feita. **Nenhum arquivo aparece no workspace.** Fora do Swarm, o DSH normal criou `dsh-tool-test.txt` sem problema. Tool calling do `qwen3.5:9b` via API do Ollama também foi verificado diretamente (retornou `tool_calls` com `finish_reason: "tool_calls"`). Os presets `standard` e `ptc` falham igual.
+
+Run analisado: `run-muvnv53f-t25k` (16:46–16:48), tarefa *"Crie um arquivo chamado swarm-qwen-test.txt contendo exatamente: QWEN SWARM TOOL TEST"*. Sessão do Builder: `c5a468df-867e-4c8d-8c93-bb3c3fb3b903`.
+
+### 15.2 Causa: o Ollama trunca o prompt
+
+Log do serviço (`journalctl -u ollama`), 16:47:
+
+```
+llama-server ... -c 4096 -np 1 ... --context-shift --keep 4
+level=WARN msg="truncating input prompt" limit=2050 prompt=8707 keep=4 new=2050
+```
+
+- O prompt do Builder tinha **8707 tokens**: 33 schemas de tool (~28 KB), system prompt (~6,3 KB), brief do Swarm e snapshot de runtime.
+- O Ollama carregou o modelo com `-c 4096`, o padrão dele, e passou **2050 tokens** ao modelo. Descartou 76% do prompt.
+- `--keep 4` preserva só os 4 primeiros tokens e o **fim** do prompt. System prompt, schemas das tools e o brief da tarefa foram descartados.
+- O `contextWindow: 32768` do `cordis.patch.yml` é **só contabilidade do DSH**. A API OpenAI-compatible do Ollama não aceita `num_ctx`; o valor nunca chega ao servidor.
+- No transcript da sessão filha, `inputTokens: 2050` nos **três** passos, apesar de o histórico crescer a cada passo. É a assinatura do truncamento.
+
+### 15.3 O comportamento do modelo bate exatamente com o que restou
+
+A última mensagem do prompt era o snapshot de runtime (política de sandbox). Foi praticamente só isso que o modelo viu:
+
+| Passo | O que o modelo fez | Explicação |
+|---|---|---|
+| 1 | Raciocínio: *"The user hasn't given me an actual task yet — they're just providing the runtime context."* Escreveu `task_acknowledged.md` com `sandbox_permissions` → `invalid escalation: sandbox_permissions requires a justification` | Brief cortado; ver §15.4 para o `sandbox_permissions` |
+| 2 | Chamou a tool `pwd` → `unknown tool "pwd"` | A lista de tools foi cortada; o modelo inventou uma |
+| 3 | *"your original request seems to have been cut off"* | Literalmente verdade |
+
+O dispatcher registrou `task/completed`. Sem contrato de evidência, o Swarm aceita `stopReason: completed` como sucesso (`lib/dispatch/spawn.js`, `spawnTaskAgent`). Daí o "concluído" sem arquivo.
+
+**Por que o DSH normal funcionou:** hipótese, **não verificada** — numa sessão de turno único o pedido do usuário fica no fim do prompt e sobrevive ao corte pelo fim.
+
+### 15.4 Causa secundária: personas pedindo `sandbox_permissions`
+
+As personas `architect` e `builder` em `~/.dsh/storages/swarm/duty-table.json` tinham sido editadas com:
+
+> When you need to create or modify a file, call the `write` tool with file_path, content, and sandbox_permissions set to "workspace-write". […]
+
+O runtime diz o contrário (*"do not request sandbox escalation (do not set `sandbox_permissions`)"*). Passar o parâmetro é um pedido de escalonamento, e sem justificativa ele é rejeitado — foi o erro do passo 1. A instrução era contraproducente mesmo sem o truncamento.
+
+### 15.5 Achado colateral: a correção da §4.4 não está ativa
+
+O `~/.dsh/profiles/web/cordis.patch.yml` atual tem `includeRuntimeContext: true`. O Makefile gera `false`, e o `make check` acusa a falta. Com `true`, o snapshot volta a ser a última mensagem de usuário — a ordem que, na §4, produziu `tool_calls=[]`. Alguém mudou isso à mão, e o motivo não está registrado. **Revertido para `false` a pedido do usuário** (backup: `cordis.patch.yml.bak-rtctx`), para que o reteste não misture as duas causas.
+
+### 15.6 O que foi aplicado
+
+| Mudança | Onde | Backup |
+|---|---|---|
+| `contextWindow: 32768` → `16384` (os dois modelos) | `~/.dsh/profiles/web/cordis.patch.yml` | `cordis.patch.yml.bak-ctx` |
+| `CONTEXT_WINDOW := 32768` → `16384`, com comentário | `Makefile` | git |
+| Removidas as 4 linhas de `sandbox_permissions` das personas `architect` e `builder` | `~/.dsh/storages/swarm/duty-table.json` | `duty-table.json.bak-persona` |
+| `includeRuntimeContext: true` → `false` (§15.5) | `~/.dsh/profiles/web/cordis.patch.yml` | `cordis.patch.yml.bak-rtctx` |
+
+O duty table foi editado com o DSH **parado**: o serviço mantém a tabela em memória e a sobrescreve no próximo save do dashboard.
+
+O `contextWindow` precisa ser **menor ou igual** ao `num_ctx` real do Ollama. Assim o DSH compacta o histórico antes de o Ollama cortá-lo. 16k e não 32k por causa dos 8 GB de VRAM. Que 32k transborde para a CPU com um 9B é suposição, **não medida**.
+
+### 15.7 Contexto do Ollama — aplicado e verificado (17:23)
+
+O usuário aplicou via `systemctl edit ollama`:
+
+```
+[Service]
+Environment="OLLAMA_CONTEXT_LENGTH=16384"
+```
+
+O log de inicialização ainda imprime `vram-based default context … default_num_ctx=4096`. Essa linha **não** indica o valor efetivo: a variável de ambiente prevalece. Verificado ao carregar o modelo (17:25):
+
+```
+llama-server ... -c 16384 ...
+llama_context: n_ctx = 16384
+load_tensors: offloaded 34/34 layers to GPU
+llama_kv_cache: size = 512.00 MiB (16384 cells, 8 layers, ...)
+```
+
+`/api/ps`: `context_length: 16384`, `size_vram` = `size` = 5,9 GB, ou seja, 100% na GPU.
+
+**Correção de uma suposição da §15.6:** o `qwen3.5:9b` é híbrido — só 8 das 32 camadas têm KV cache. 16k custam 512 MiB de KV, então 32k custaria cerca de +512 MiB (~6,4 GB no total). Provavelmente **cabe** nos 8 GB. A suposição de que 32k transbordaria para a CPU era pessimista. Não foi medido; 16k já cobre o prompt de ~8,7k com folga.
+
+### 15.8 Como verificar
+
+1. ~~`-c 16384` no `starting llama-server`~~ — confirmado (§15.7). Ausência de `truncating input prompt` num run do Swarm — confirmada (§15.9).
+2. Na sessão filha, `inputTokens` passa de ~8k e cresce entre passos.
+3. `swarm-qwen-test.txt` existe no workspace com o conteúdo pedido.
+
+### 15.9 Reteste (17:30) — o arquivo foi criado
+
+Run `run-muvpeqlk-hma9`, mesma tarefa, com todas as mudanças de §15.6–15.7 ativas.
+
+**Resultado:** `/home/itaipu/Documents/dsh/swarm-qwen-test.txt` existe, 20 bytes, conteúdo exato `QWEN SWARM TOOL TEST`.
+
+**Atenção — modelo diferente.** O duty table estava fixado em `granite4.1:8b` (mudado pelo dashboard às 16:49, depois do run que falhou). O run que falhou (§15.1) usou `qwen3.5:9b`. **Portanto isto não prova a correção para o Qwen.** Mas há um A/B limpo para o Granite: o run `run-muvmvi3u-s84g` (16:19, contexto 4096, runtime context ligado) usou `granite4.1:8b` nos dois papéis e falhou do mesmo jeito — os dois resumos foram um *"Runtime Context Summary"*, ou seja, o modelo só viu o snapshot.
+
+| | Antes (16:19, Granite) | Depois (17:30, Granite) |
+|---|---|---|
+| `num_ctx` efetivo | 4096 | 16384 |
+| `truncating input prompt` | sim | **nenhuma ocorrência** |
+| Prompt inicial | truncado | 7785 / 7791 tokens, inteiros |
+| Resumo do agente | descreve o runtime context | descreve a tarefa |
+| Arquivo criado | não | **sim** |
+
+Tool calls observadas (sessões `4b1fddc4…` Architect e `9b6ff779…` Builder):
+
+- **Architect:** escreveu `.dsh-swarm/task-plan.json` declarando ter criado `PLAN.md`, que **nunca foi criado**. Em seguida criou o próprio `swarm-qwen-test.txt` — fora do seu papel — com conteúdo errado (`PLAN.md\nQWEN SWARM TOOL TEST`). Passou `sandbox_permissions` com `justification`, e o pedido foi aceito.
+- **Builder:** `read PLAN.md` → not found; `web_search` → sem `DEEPSEEK_API_KEY` (mesmo problema da §14.5); `write` → recusado por *"file has not been read"*; `read`; `write` → corrigiu o conteúdo; escreveu `task-execute.json`. O resultado final está certo por causa do Builder.
+
+### 15.10 Reteste com `qwen3.5:9b` (17:36) — A/B fechado
+
+Run `run-muvpm4lm-sajm`, mesma tarefa, os quatro papéis em `qwen3.5:9b`. `swarm-qwen-test.txt` foi apagado antes do run.
+
+| | Qwen antes (16:47, `run-muvnv53f-t25k`) | Qwen depois (17:36, `run-muvpm4lm-sajm`) |
+|---|---|---|
+| `num_ctx` efetivo | 4096 | 16384 |
+| `truncating input prompt` | `limit=2050 prompt=8707` | **nenhuma ocorrência** |
+| `inputTokens` do primeiro passo | 2050 | 8990 (Architect), 9012 (Builder) |
+| Tool calls | `write` com `sandbox_permissions` → erro; `pwd` inexistente | `write`, `read`, `bash`, `todo_write`, `swarm_report` — todas válidas |
+| `PLAN.md` | não | **sim**, plano coerente com fases e critérios de aceite |
+| `swarm-qwen-test.txt` | não | **sim**, 20 bytes, conteúdo exato |
+
+Desta vez os papéis se comportaram como esperado. O Architect escreveu só o `PLAN.md` e o relatório da tarefa. O Builder leu o plano, criou o arquivo, conferiu os bytes com `od -c` (tentou `xxd` antes, que não está instalado), postou `swarm_report` e gravou o relatório. Nenhuma alegação falsa nos resumos.
+
+Atritos menores, sem efeito no resultado:
+
+- O Builder tentou sobrescrever o `task-execute.json` do run anterior e recebeu *"file has not been read"*. Leu e repetiu. O dispatcher já ignora relatórios antigos (J22, `adoptTaskReport` compara o `mtime` com o início da tentativa), mas a guarda de leitura do `write` ainda tropeça neles.
+- O Architect gravou o `task-plan.json` com `bash` + heredoc, contornando a ferramenta `write` e a guarda de leitura dela.
+- O `PLAN.md` diz que o conteúdo tem "35 characters"; tem 20.
+
+**Conclusão da §15:** a causa do Swarm "concluir sem criar arquivos" era o truncamento silencioso do prompt pelo Ollama (`num_ctx` 4096). As personas com `sandbox_permissions` e o `includeRuntimeContext: true` agravavam o problema. Com `OLLAMA_CONTEXT_LENGTH=16384`, `qwen3.5:9b` e `granite4.1:8b` executam ferramentas reais dentro do Swarm. Não foi testado qual das três correções, isolada, já bastaria.
+
+### 15.11 Ainda em aberto
+
+1. ~~Repetir com `qwen3.5:9b`~~ — feito, §15.10.
+2. **O Swarm aceita relatórios falsos.** O Architect declarou `PLAN.md` criado e a tarefa foi marcada `completed`. O plano padrão do Swarm não define contrato de evidência, então nada verifica o arquivo.
+3. **`web_search` continua quebrado** no setup local (§14.5).
+
+### 15.12 Como isso foi verificado
+
+Leitura, mais uma única geração de 1 token para forçar o carregamento do modelo (§15.7): `events.jsonl` do Swarm, transcript da sessão filha (`session.v4.jsonl.zstd`), `journalctl -u ollama`, código do plugin em `~/.dsh/profiles/web/node_modules/dsh-swarm-orchestrator/lib/`. Nenhuma geração de agente foi executada.
