@@ -1,5 +1,5 @@
 # ============================================================
-# Makefile — DSH + dsh-swarm-orchestrator + Ollama/qwen3:8b
+# Makefile — DSH + dsh-swarm-orchestrator + Ollama local
 # ============================================================
 # Política de versão:
 #   DSH_VERSION   = versão exata do DSH a instalar (reprodutível)
@@ -54,10 +54,28 @@ OLLAMA_HOST    := http://127.0.0.1:11434
 OLLAMA_URL     := $(OLLAMA_HOST)/v1
 MODEL          := qwen3.5:9b
 MODEL_LABEL    := Qwen3.5 9B
+# Modelos adicionais no catálogo do provider (não são o padrão). Ficam
+# selecionáveis no Roster e servem de fallback — o Architect usa o
+# granite como fallback. Separados por espaço; o nome exibido é o id.
+EXTRA_MODELS   := granite4.1:8b
 # Tem que bater com OLLAMA_CONTEXT_LENGTH do serviço ollama: pela API
 # OpenAI-compatible o Ollama ignora este valor e usa o próprio num_ctx
 # (padrão 4096), truncando o prompt em silêncio. Ver relatório §15.
+# `config-ollama` fixa o serviço neste mesmo valor.
 CONTEXT_WINDOW := 16384
+
+# Uma entrada de catálogo por modelo extra, já indentada para o bloco.
+define NL
+
+
+endef
+EXTRA_MODEL_ENTRIES := $(foreach m,$(EXTRA_MODELS),$(NL)          - id: $(m)$(NL)            name: $(m)$(NL)            contextWindow: $(CONTEXT_WINDOW))
+
+# Drop-in systemd do Ollama gerenciado por este Makefile. O prefixo
+# zz- faz ele ser lido por último e prevalecer sobre o override.conf
+# que o `systemctl edit` cria.
+OLLAMA_UNIT    := ollama
+OLLAMA_DROPIN  := /etc/systemd/system/$(OLLAMA_UNIT).service.d/zz-dsh-context.conf
 
 WEB_PORT       := 3080
 
@@ -75,7 +93,7 @@ DSH_VERSION    := 0.2.0-rc.2
 SWARM_VERSION  := 0.6.30
 
 .PHONY: help check-prereqs install-dsh ensure-model install-swarm \
-        install config-provider config-roster config start \
+        install config-ollama config-provider config-roster config start \
         verify test test-dsh test-tools status clean setup
 
 # ------------------------------------------------------------
@@ -86,7 +104,8 @@ help:
 	@echo ""
 	@echo "  make setup        Instala, configura, verifica e testa"
 	@echo "  make install      Instala DSH + Swarm + garante o modelo"
-	@echo "  make config       Escreve o provider Ollama e o Roster do Swarm"
+	@echo "  make config       Fixa o contexto do Ollama, escreve o provider e o Roster"
+	@echo "  make config-ollama  Fixa OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW) (sudo se mudar)"
 	@echo "  make start        Inicia o DSH Web em http://127.0.0.1:$(WEB_PORT)"
 	@echo "  make verify       Verifica instalação (falha se algo essencial faltar)"
 	@echo "  make test         Testa geração via API OpenAI-compatible"
@@ -201,7 +220,7 @@ define MANAGED_BLOCK
         models:
           - id: $(MODEL)
             name: $(MODEL_LABEL)
-            contextWindow: $(CONTEXT_WINDOW)
+            contextWindow: $(CONTEXT_WINDOW)$(EXTRA_MODEL_ENTRIES)
 
 - id: agent-default-model
   config:
@@ -289,6 +308,43 @@ endef
 export CRED_SCRIPT
 
 # ------------------------------------------------------------
+# Contexto do Ollama: OLLAMA_CONTEXT_LENGTH = CONTEXT_WINDOW
+#
+# Sem isso o Ollama carrega o modelo com o num_ctx padrão (4096 numa
+# GPU de 8 GB) e trunca o prompt pelo início: o agente perde o system
+# prompt, os schemas das tools e a tarefa (relatório §15.2).
+#
+# Idempotente: lê o ambiente efetivo da unit e só escreve o drop-in
+# (com sudo) e reinicia o serviço quando o valor difere. Fora do
+# systemd (ex.: `ollama serve` manual) apenas avisa.
+# ------------------------------------------------------------
+config-ollama:
+	@echo "==> Verificando OLLAMA_CONTEXT_LENGTH do serviço $(OLLAMA_UNIT)..."
+	@if ! systemctl cat "$(OLLAMA_UNIT)" >/dev/null 2>&1; then \
+		echo "   AVISO: unit systemd $(OLLAMA_UNIT) não encontrada."; \
+		echo "   Exporte OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW) antes de 'ollama serve'."; \
+		exit 0; \
+	fi; \
+	if systemctl show "$(OLLAMA_UNIT)" -p Environment --value \
+			| tr ' ' '\n' | grep -qx 'OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW)'; then \
+		echo "   OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW) já ativo. OK."; \
+		exit 0; \
+	fi; \
+	echo "   → Gravando $(OLLAMA_DROPIN) (requer sudo)..."; \
+	printf '[Service]\nEnvironment="OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW)"\n' \
+		| sudo install -D -m 0644 /dev/stdin "$(OLLAMA_DROPIN)" || { \
+		echo "ERRO: falha ao gravar $(OLLAMA_DROPIN)."; exit 1; }; \
+	sudo systemctl daemon-reload && sudo systemctl restart "$(OLLAMA_UNIT)" || { \
+		echo "ERRO: falha ao reiniciar $(OLLAMA_UNIT)."; exit 1; }; \
+	for i in $$(seq 1 30); do \
+		curl -sf "$(OLLAMA_HOST)/api/tags" >/dev/null 2>&1 && break; sleep 1; \
+	done; \
+	systemctl show "$(OLLAMA_UNIT)" -p Environment --value \
+		| tr ' ' '\n' | grep -qx 'OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW)' || { \
+		echo "ERRO: o valor ainda não está ativo; confira 'systemctl cat $(OLLAMA_UNIT)'."; exit 1; }; \
+	echo "   OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW) ativo."
+
+# ------------------------------------------------------------
 # Configuração do provider Ollama
 #
 # Além do patch do perfil, grava a credencial simbólica no
@@ -324,6 +380,13 @@ config-provider:
 # o Ollama. Mas fixar explicitamente garante que Architect /
 # Builder / Reviewer / Integrator continuem locais mesmo que o
 # modelo padrão da sessão mude.
+#
+# O seed também restaura ao default do plugin qualquer persona que
+# mande passar `sandbox_permissions` (relatório §15.4).
+#
+# Recusa rodar com o DSH no ar: o serviço do Swarm mantém o duty
+# table em memória e sobrescreve o arquivo no próximo save do
+# dashboard, desfazendo a edição.
 # ------------------------------------------------------------
 config-roster:
 	@echo "==> Fixando o Roster do Swarm em ollama / $(MODEL)..."
@@ -331,11 +394,16 @@ config-roster:
 			| grep -q 'dsh-swarm-orchestrator'; then \
 		echo "   AVISO: Swarm não instalado; Roster pulado."; \
 		exit 0; \
-	fi
-	@node "$(ROSTER_SEED)" "$(DUTY_TABLE)" ollama "$(MODEL)"
+	fi; \
+	if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$(WEB_PORT)/"; then \
+		echo "ERRO: o DSH está rodando em :$(WEB_PORT). Pare-o e rode de novo —"; \
+		echo "      com ele no ar a edição do duty table seria sobrescrita."; \
+		exit 1; \
+	fi; \
+	node "$(ROSTER_SEED)" "$(DUTY_TABLE)" ollama "$(MODEL)"
 	@echo "   → $(DUTY_TABLE)"
 
-config: config-provider config-roster
+config: config-ollama config-provider config-roster
 
 # ------------------------------------------------------------
 # Start
@@ -373,7 +441,16 @@ verify:
 			|| { echo "   ERRO: baseURL do Ollama ausente em $$f"; ok=0; }; \
 		grep -q "model: $(MODEL)" "$$f" 2>/dev/null \
 			|| { echo "   ERRO: modelo padrão ausente em $$f"; ok=0; }; \
+		grep -q "contextWindow: $(CONTEXT_WINDOW)" "$$f" 2>/dev/null \
+			|| { echo "   ERRO: contextWindow $(CONTEXT_WINDOW) ausente em $$f"; ok=0; }; \
 	done; \
+	if systemctl cat "$(OLLAMA_UNIT)" >/dev/null 2>&1; then \
+		systemctl show "$(OLLAMA_UNIT)" -p Environment --value \
+			| tr ' ' '\n' | grep -qx 'OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW)' \
+			|| { echo "   ERRO: OLLAMA_CONTEXT_LENGTH=$(CONTEXT_WINDOW) não ativo no serviço $(OLLAMA_UNIT) (prompt será truncado; rode make config-ollama)"; ok=0; }; \
+	else \
+		echo "   AVISO: sem unit systemd $(OLLAMA_UNIT); confira OLLAMA_CONTEXT_LENGTH à mão"; \
+	fi; \
 	grep -qE '^[[:space:]]+OLLAMA_API_KEY:' "$(CREDENTIALS)" 2>/dev/null \
 		|| { echo "   ERRO: OLLAMA_API_KEY ausente de $(CREDENTIALS)"; ok=0; }; \
 	test -f "$(ROSTER_SEED)" \
@@ -385,6 +462,8 @@ verify:
 	if [ -f "$(DUTY_TABLE)" ]; then \
 		jq -e --arg m "$(MODEL)" '[.roles | to_entries[]? | select(.key | test("^(architect|builder|reviewer|integrator)$$")) | select(.value.provider == "ollama" and .value.model == $$m) | select(.value.fallbacks | type == "array")] | length == 4' "$(DUTY_TABLE)" >/dev/null 2>&1 \
 			|| { echo "   ERRO: Roster do Swarm não fixado em ollama/$(MODEL) em $(DUTY_TABLE)"; ok=0; }; \
+		jq -e '[.roles[]?.persona // "" | select(contains("sandbox_permissions"))] | length == 0' "$(DUTY_TABLE)" >/dev/null 2>&1 \
+			|| { echo "   ERRO: persona do Swarm manda passar sandbox_permissions (rode make config-roster)"; ok=0; }; \
 	else \
 		echo "   AVISO: Roster do Swarm ausente (usa o padrão do deployment)"; \
 	fi; \
@@ -395,6 +474,7 @@ verify:
 		echo "   Rota:    ollama/$(MODEL)"; \
 		echo "   Default: ollama/$(MODEL)"; \
 		echo "   Roster:  architect/builder/reviewer/integrator → ollama/$(MODEL)"; \
+		echo "   Contexto: $(CONTEXT_WINDOW) (DSH e Ollama)"; \
 	else \
 		echo "==> Verificação FALHOU."; \
 		exit 1; \
@@ -589,6 +669,10 @@ clean:
 		done; \
 		rm -f "$(DUTY_TABLE)"; \
 		echo "==> Swarm e configuração local removidos."; \
+		if [ -f "$(OLLAMA_DROPIN)" ]; then \
+			echo "   O drop-in $(OLLAMA_DROPIN) foi mantido (afeta o Ollama todo)."; \
+			echo "   Para remover: sudo rm $(OLLAMA_DROPIN) && sudo systemctl daemon-reload && sudo systemctl restart $(OLLAMA_UNIT)"; \
+		fi; \
 	else \
 		echo "==> Cancelado."; \
 	fi

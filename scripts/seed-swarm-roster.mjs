@@ -10,7 +10,8 @@
 //
 // Idempotente e não destrutivo: campos já customizados (label,
 // description, persona, fallbacks) são preservados; só provider e
-// model são fixados.
+// model são fixados. Exceção: uma persona que mande passar
+// `sandbox_permissions` volta ao default do plugin (ver abaixo).
 //
 //   node scripts/seed-swarm-roster.mjs <duty-table.json> <provider> <modelo>
 
@@ -84,6 +85,13 @@ for (const id of PINNED) {
   role.provider = provider
   role.model = model
   role.fallbacks ??= []
+  // Persona que manda passar sandbox_permissions sabota o write: o
+  // runtime trata o parâmetro como pedido de escalonamento e o rejeita
+  // sem justificativa (relatório §15.4). Volta ao texto do plugin.
+  if (typeof role.persona === 'string' && role.persona.includes('sandbox_permissions')) {
+    role.persona = base.roles[id].persona
+    console.log(`  ${id}: persona com sandbox_permissions restaurada ao default do plugin`)
+  }
 }
 
 table.version = 1

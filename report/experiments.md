@@ -665,6 +665,13 @@ O duty table foi editado com o DSH **parado**: o serviço mantém a tabela em me
 
 O `contextWindow` precisa ser **menor ou igual** ao `num_ctx` real do Ollama. Assim o DSH compacta o histórico antes de o Ollama cortá-lo. 16k e não 32k por causa dos 8 GB de VRAM. Que 32k transborde para a CPU com um 9B é suposição, **não medida**.
 
+**Depois, tudo isso passou a ser gerenciado pelo Makefile**, para uma máquina nova não repetir o problema:
+
+- `make config-ollama` (dentro do `make config`) fixa `OLLAMA_CONTEXT_LENGTH = CONTEXT_WINDOW` num drop-in próprio, `/etc/systemd/system/ollama.service.d/zz-dsh-context.conf`. Só pede sudo quando o valor efetivo da unit difere.
+- `scripts/seed-swarm-roster.mjs` restaura ao default do plugin qualquer persona que mencione `sandbox_permissions`. O `config-roster` recusa rodar com o DSH no ar.
+- O perfil `web`, antes escrito à mão, foi convertido para o bloco gerenciado (backup `cordis.patch.yml.bak-managed`). O modelo padrão passou de `granite4.1:8b` para `qwen3.5:9b`. O Granite continua no catálogo via `EXTRA_MODELS`, porque é o fallback do Architect.
+- O `make verify` confere `contextWindow` nos dois perfis, `OLLAMA_CONTEXT_LENGTH` ativo na unit e ausência de `sandbox_permissions` nas personas.
+
 ### 15.7 Contexto do Ollama — aplicado e verificado (17:23)
 
 O usuário aplicou via `systemctl edit ollama`:
