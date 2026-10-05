@@ -753,3 +753,67 @@ Atritos menores, sem efeito no resultado:
 ### 15.12 Como isso foi verificado
 
 Leitura, mais uma única geração de 1 token para forçar o carregamento do modelo (§15.7): `events.jsonl` do Swarm, transcript da sessão filha (`session.v4.jsonl.zstd`), `journalctl -u ollama`, código do plugin em `~/.dsh/profiles/web/node_modules/dsh-swarm-orchestrator/lib/`. Nenhuma geração de agente foi executada.
+
+---
+
+## 16. Adendo — Truco no Swarm: a janela de 16k enche (2026-10-05, ~18h)
+
+### 16.1 Sintoma
+
+Tarefa: app web de Truco Paulista em Perl/Mojolicious com frontend jQuery. Run `run-muvq5bsv-wbcf`: o plano saiu, o `execute` falhou 3 vezes com `child stopped: max-tokens` e o run terminou `failed`.
+
+### 16.2 Causa: a janela de contexto inteira, não o limite de saída
+
+Nas 4 sessões do Qwen que falharam (`7144b646`, `bf787005`, `f36914ec`, `2feacbb7`), o último passo termina com `totalTokens: 16384` e `stopReason: "length"`. É a janela de contexto inteira, não o limite de saída.
+
+| Componente | Tokens |
+|---|---|
+| Fixo por requisição: system prompt + schemas das 33 tools + brief | ~10.600 |
+| Sobra para o trabalho | ~5.700 |
+| Escrever um arquivo de 6 KB (`Game.pm`) | ~2.000 de saída, que ficam no histórico |
+
+Cada tentativa recomeça do zero e esbarra no mesmo teto depois de 1–2 arquivos.
+
+Agravantes:
+
+- **Schemas de tools ociosas.** Medidos em bytes de JSON: `swarm_dispatch` 4,2 KB, `workflow` 3,5 KB, `bash` 2,3 KB, … As 8 tools que um Builder usa (`read`, `write`, `edit`, `bash`, `glob`, `grep`, `todo_write`, `swarm_report`) somam ~7,6 KB, cerca de ¼ do total.
+- **Sobras do run anterior no workspace.** A 1ª tentativa do Architect escreveu um `PLAN.md` de 13 KB, recusado por *"file has not been read"*: havia um `PLAN.md` do teste anterior. Leu, ficou sem janela, e o Swarm caiu no fallback (`granite4.1:8b`), que fez o plano.
+- **A tarefa é grande demais para um único agente.** O plano padrão do Swarm tem um único "execute o plano inteiro". Não foi verificado se o DSH compacta o histórico ao encher a janela; neste run, não compactou.
+- O modelo também criou um diretório `truc app` (com espaço) ao lado do `truco-app`, e uma escrita nele recebeu uma recusa de escalonamento para `danger-full-access`. Não investigado.
+
+### 16.3 Aplicado
+
+| Mudança | Onde |
+|---|---|
+| `toolFilter.allow` por papel: 8 tools para architect/builder/integrator, 5 para reviewer (sem escrita) | `scripts/seed-swarm-roster.mjs` |
+| O seed preserva `override` (a trava manual do dashboard), que antes descartava | `scripts/seed-swarm-roster.mjs` |
+| `make verify` exige `toolFilter` nos 4 papéis | `Makefile` |
+| `make clean-workspace`: **move** o conteúdo do workspace para `~/.dsh/workspace-archive/<data-hora>/`. Pede confirmação, ou `YES=1` | `Makefile` |
+
+O workspace foi arquivado em `~/.dsh/workspace-archive/20261005-181505/`. **O `toolFilter` ainda não foi aplicado ao duty table em uso:** exige o DSH parado (`make config-roster`).
+
+### 16.4 Medição: contexto de 32k na RTX 2080 (8 GB)
+
+Mesmo prompt real (schemas das tools + system prompt + PLAN.md + Game.pm), `temperature: 0`, `think: false`, 128 tokens de saída. As configs A e B rodaram no serviço; a C, numa instância temporária do Ollama na porta 11435, encerrada depois.
+
+| Config | Camadas na GPU | VRAM do modelo | Prompt 8k: geração | Prompt 19k: geração |
+|---|---|---|---|---|
+| **A** 16k, KV f16 (atual) | 34/34 | 5,90 GB | **43,7 tok/s** | não cabe |
+| **B** 32k, KV f16 | **33/34** (0,8 GB na CPU) | 6,33 + 0,8 GB | 34,4 tok/s | 30,5 tok/s |
+| **C** 32k, KV q8_0 + flash attention | 34/34 | **6,05 GB** | 39,7 tok/s | **38,4 tok/s** |
+
+KV cache de 32k: 1024 MiB em f16 e 544 MiB em q8_0. Processamento do prompt: 1150–1700 tok/s em todas.
+
+**Leitura:** a C dobra a janela, cabe inteira na GPU e custa ~9% de velocidade de geração em relação à A. A B transborda uma camada para a CPU e perde 21–30%. Isso corrige a suposição da §15.7: 32k em f16 **não** cabe.
+
+**Não medido:** o efeito da quantização q8_0 do KV cache na qualidade das tool calls. A literatura costuma reportar perda pequena para q8_0, mas isso não foi verificado com este modelo e este harness.
+
+**Para aplicar a C**, com sudo, no serviço:
+
+```
+Environment="OLLAMA_CONTEXT_LENGTH=32768"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+```
+
+Com `CONTEXT_WINDOW := 32768` no Makefile (o `config-ollama` hoje só gerencia o tamanho do contexto).

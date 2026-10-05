@@ -79,6 +79,11 @@ OLLAMA_DROPIN  := /etc/systemd/system/$(OLLAMA_UNIT).service.d/zz-dsh-context.co
 
 WEB_PORT       := 3080
 
+# Workspace onde os runs do Swarm escrevem, e para onde clean-workspace
+# move o conteúdo antigo (nada é apagado).
+WORKSPACE      := $(HOME)/Documents/dsh
+WS_ARCHIVE     := $(DSH_HOME)/workspace-archive
+
 # Inferência em CPU usa todos os núcleos: os alvos de teste rodam
 # com nice/ionice e nunca em paralelo.
 TOOLS_TIMEOUT  := 300
@@ -94,7 +99,7 @@ SWARM_VERSION  := 0.6.30
 
 .PHONY: help check-prereqs install-dsh ensure-model install-swarm \
         install config-ollama config-provider config-roster config start \
-        verify test test-dsh test-tools status clean setup
+        verify test test-dsh test-tools status clean clean-workspace setup
 
 # ------------------------------------------------------------
 # Help
@@ -113,6 +118,7 @@ help:
 	@echo "  make test-dsh     Testa integração DSH → llm-pi-ai → Ollama"
 	@echo "  make status       Mostra estado do ambiente"
 	@echo "  make clean        Remove o plugin Swarm e a configuração local"
+	@echo "  make clean-workspace  Arquiva o conteúdo de $(WORKSPACE) (YES=1 sem perguntar)"
 	@echo ""
 	@echo "Variáveis:"
 	@echo "  DSH_VERSION=$(DSH_VERSION)  SWARM_VERSION=$(SWARM_VERSION)"
@@ -464,6 +470,8 @@ verify:
 			|| { echo "   ERRO: Roster do Swarm não fixado em ollama/$(MODEL) em $(DUTY_TABLE)"; ok=0; }; \
 		jq -e '[.roles[]?.persona // "" | select(contains("sandbox_permissions"))] | length == 0' "$(DUTY_TABLE)" >/dev/null 2>&1 \
 			|| { echo "   ERRO: persona do Swarm manda passar sandbox_permissions (rode make config-roster)"; ok=0; }; \
+		jq -e '[.roles | to_entries[]? | select(.key | test("^(architect|builder|reviewer|integrator)$$")) | select((.value.toolFilter.allow | type) == "array")] | length == 4' "$(DUTY_TABLE)" >/dev/null 2>&1 \
+			|| { echo "   ERRO: papéis do Swarm sem toolFilter — os schemas de todas as tools enchem o contexto (rode make config-roster)"; ok=0; }; \
 	else \
 		echo "   AVISO: Roster do Swarm ausente (usa o padrão do deployment)"; \
 	fi; \
@@ -648,6 +656,30 @@ setup:
 	@echo "fixado em ollama/$(MODEL)."
 	@echo ""
 	@echo "============================================================"
+
+# ------------------------------------------------------------
+# Clean-workspace: arquiva o que runs anteriores deixaram no workspace.
+#
+# Sobras de um run atrapalham o seguinte: o write recusa sobrescrever
+# arquivo não lido, e o agente gasta contexto lendo e contornando o
+# PLAN.md e os relatórios antigos (relatório §16). Nada é apagado — o
+# conteúdo vai para $(WS_ARCHIVE)/<data-hora>/.
+# ------------------------------------------------------------
+clean-workspace:
+	@if [ ! -d "$(WORKSPACE)" ] || [ -z "$$(ls -A "$(WORKSPACE)")" ]; then \
+		echo "==> $(WORKSPACE) já está vazio."; exit 0; \
+	fi; \
+	dest="$(WS_ARCHIVE)/$$(date +%Y%m%d-%H%M%S)"; \
+	echo "==> Conteúdo de $(WORKSPACE):"; \
+	ls -A "$(WORKSPACE)" | sed 's/^/     /'; \
+	echo "   Será movido para $$dest"; \
+	if [ "$(YES)" != "1" ]; then \
+		read -p "Continuar? [s/N] " -n 1 -r; echo; \
+		[[ $$REPLY =~ ^[Ss]$$ ]] || { echo "==> Cancelado."; exit 0; }; \
+	fi; \
+	mkdir -p "$$dest" && \
+	find "$(WORKSPACE)" -mindepth 1 -maxdepth 1 -exec mv -t "$$dest" {} + && \
+	echo "==> Workspace limpo; conteúdo arquivado em $$dest"
 
 # ------------------------------------------------------------
 # Clean (conservador: remove o plugin e a configuração local)
