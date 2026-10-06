@@ -990,3 +990,40 @@ Esses tamanhos são os típicos desses modelos, não medidos nessa máquina.
 ### 19.3 Conclusão
 
 Ela não serve para o DSH nem para o Swarm: o modelo em uso não cabe na memória, e mesmo um de 1,7B levaria minutos só para ler o prompt fixo do harness. Serve, no máximo, para testes curtos de tool calling com um modelo de ~1,7B, fora do harness. Números reais exigiriam instalar o Ollama lá e medir, com a trava térmica (§17.5) rodando junto.
+
+---
+
+## 20. Plano de melhoria térmica para esta máquina (i7-8750H + RTX 2080 Max-Q)
+
+Base: as medições da §18. O que esquenta a CPU é a potência da GPU (~88 W gerando), num resfriamento que tudo indica ser compartilhado. Por isso, o que **aumenta a capacidade de resfriamento** vem antes dos ajustes de software, que agem só na CPU. A ordem é por custo e impacto esperado. **Nenhum item foi aplicado ou medido ainda.**
+
+### 20.1 Itens, em ordem
+
+| # | Item | Custo | Impacto esperado | Observações |
+|---|---|---|---|---|
+| 1 | **Ambiente:** superfície dura, traseira elevada 2–3 cm, sala fresca; achar a aba do Chrome que consome ~150% de CPU e ~24% da GPU em repouso (`Shift+Esc` no Chrome) | zero | baixo–médio | Notebooks Blade puxam ar por baixo; cama ou colo bloqueiam |
+| 2 | **Limpeza** das ventoinhas e aletas com ar comprimido, travando as pás | baixo | alto | Máquina de ~2018: poeira nas aletas é provável. Primeiro passo físico: barato, rápido, reversível |
+| 3 | **Troca da pasta térmica e checagem dos thermal pads** | médio (ou assistência técnica) | potencialmente o maior | Pasta com 6–7 anos tende a estar seca. Exige desmontar o dissipador. **Checar a bateria**: estufamento é um problema conhecido nos Blade dessa época e, se houver, a troca é prioritária por segurança |
+| 4 | **Base com ventilação** | baixo–médio | moderado (poucos °C, tipicamente) | Comprar **depois** de 2 e 3; ela não compensa um dissipador entupido. Ventoinhas alinhadas às entradas de baixo |
+| 5 | **Software na CPU:** desligar o turbo nos experimentos (`intel_pstate/no_turbo`); undervolt (`intel-undervolt`, se o BIOS não bloquear, como costuma acontecer depois do Plundervolt); perfis de ventoinha e de energia da Razer (no Linux, ferramentas da comunidade; compatibilidade não verificada); `num_thread: 2` no Ollama | zero | limitado | Age na CPU; o calor vem principalmente da GPU. Na GPU não há alavanca útil: `-pl` não é suportado e `-lgc` cortou só ~7% (§18) |
+| 6 | **Forma de trabalho:** tarefas pequenas por run, pausas para esfriar, modelo menor se a qualidade das tool calls se mantiver | zero | depende do uso | Reduz a duração do calor, não o pico |
+
+### 20.2 Como medir cada passo
+
+`make thermal-bench LABEL=<passo>` (`scripts/thermal-bench.sh`) repete o protocolo da §18:
+
+1. espera a CPU baixar até ≤ 60 °C;
+2. gera com o mesmo prompt, direto na API do Ollama;
+3. amostra temperaturas, GPU e processos a cada 2 s;
+4. aborta a 85 °C e grava um CSV em `~/.dsh/thermal-bench/`.
+
+Rode-o com `make thermal-watch` aberto em outro terminal.
+
+Duas métricas, sempre partindo de ≤ 60 °C:
+
+- **Tempo até 85 °C.** Referência atual: 2–16 s (§18.3).
+- **Se a temperatura estabiliza abaixo de 85 °C** dentro do limite de 120 s. É o objetivo.
+
+Sequência sugerida de rótulos: `antes`, `ambiente`, `limpeza`, `pasta`, `base`. Um passo por vez, para atribuir o ganho a cada um.
+
+O script foi testado só sem geração (Ollama inexistente na porta 1): a espera, a amostragem, o CSV e o caminho de abortar funcionaram. **Ainda não rodou com geração real.**

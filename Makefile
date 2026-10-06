@@ -88,6 +88,7 @@ WS_ARCHIVE     := $(DSH_HOME)/workspace-archive
 # runner do Ollama e o DSH na hora. CPU crítica = 100 °C; a GPU reduz
 # clock em 94 °C.
 THERMAL_GUARD  := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))scripts/thermal-guard.sh)
+THERMAL_BENCH  := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))scripts/thermal-bench.sh)
 CPU_MAX        := 90
 GPU_MAX        := 85
 
@@ -107,7 +108,7 @@ SWARM_VERSION  := 0.6.30
 .PHONY: help check-prereqs install-dsh ensure-model install-swarm \
         install config-ollama config-provider config-roster config start \
         verify test test-dsh test-tools status clean clean-workspace setup \
-        thermal-watch thermal-status
+        thermal-watch thermal-status thermal-bench
 
 # ------------------------------------------------------------
 # Help
@@ -122,6 +123,7 @@ help:
 	@echo "  make start        Inicia o DSH Web em http://127.0.0.1:$(WEB_PORT) com a trava térmica"
 	@echo "  make thermal-watch  Vigia a temperatura; acima de CPU $(CPU_MAX)°C / GPU $(GPU_MAX)°C mata Ollama e DSH"
 	@echo "  make thermal-status Mostra as temperaturas e os limites"
+	@echo "  make thermal-bench  Mede o aquecimento numa geração (LABEL=antes-limpeza etc.)"
 	@echo "  make verify       Verifica instalação (falha se algo essencial faltar)"
 	@echo "  make test         Testa geração via API OpenAI-compatible"
 	@echo "  make test-tools   Testa se o agente USA ferramentas (1 exec, nice)"
@@ -447,6 +449,12 @@ thermal-watch:
 
 thermal-status:
 	@CPU_MAX=$(CPU_MAX) GPU_MAX=$(GPU_MAX) "$(THERMAL_GUARD)" status
+
+# Protocolo da §18, para comparar antes/depois de cada melhoria física
+# (§20). Rode com `make thermal-watch` aberto em outro terminal.
+thermal-bench:
+	@MODEL="$(MODEL)" NUM_CTX="$(CONTEXT_WINDOW)" OLLAMA_HOST="$(OLLAMA_HOST)" \
+		LABEL="$(or $(LABEL),bench)" "$(THERMAL_BENCH)"
 
 # ------------------------------------------------------------
 # Verify — retorna erro se algo essencial falhar
