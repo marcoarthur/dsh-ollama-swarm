@@ -1,8 +1,8 @@
 # Experimento: Ollama local + modelos Qwen + DeepSeek Harness
 
-**Data:** 2026-10-02
-**Máquina:** Linux x86_64, **sem GPU** — inferência 100% em CPU
-**Status:** inconclusivo em duas rodadas iniciais, **conclusivo** na rodada final (ver §6); adendo sobre `qwen2.5-coder:7b` em §14; Swarm + truncamento de contexto do Ollama em §15
+**Data:** 2026-10-02 a 2026-10-06
+**Máquina:** §1–§14, inferência 100% em CPU, como registrado na época. A partir da §15: Razer Blade 15 (2019, RZ09-0288), i7-8750H, **RTX 2080 Max-Q 8 GB**, 16 GB de RAM, inferência na GPU.
+**Status:** §1–§14, primeiro dia (tool calling, laço degenerado, `qwen2.5-coder`). §15–§16: truncamento do Ollama e janela de 16k. §17–§20 e §24: calor. §21–§23: avaliação de alternativas e dos modelos. §25–§26: corte das tools do preset. §27: verificações sem geração. **§28: pendências.**
 
 ---
 
@@ -18,6 +18,17 @@ A pergunta era: *"o agente usa ferramentas, ou só responde com texto?"*
 | 2 | O modelo emitia tool call e entrava em **loop degenerado** | Patologia do modelo 8B + falta de teto duro | **Diagnosticado, não corrigido** |
 | 3 | `qwen2.5-coder:7b` emite tool call **como texto**, nada executa | Formato de tool call não suportado pela série Coder | **Diagnosticado; ver §14** |
 | 4 | Swarm "conclui" sem criar arquivo nenhum | Ollama trunca o prompt para ~2k tokens (`num_ctx` 4096 padrão) | **Corrigido e comprovado** com `qwen3.5:9b` e `granite4.1:8b` (§15) |
+
+**Atualização (2026-10-06)** — defeitos encontrados depois do primeiro dia:
+
+| # | Defeito | Natureza | Situação |
+|---|---------|----------|----------|
+| 5 | A janela de 16k enche em 1–2 arquivos | ~10,6k tokens fixos por requisição, dos quais ~7k são schemas de tools (§16) | **Mitigado:** corte das tools do preset, 1º prompt −43% (§26) |
+| 6 | O `toolFilter` do Swarm tira `read`/`write`/`bash` do agente | Plugin valida contra as tools globais; no DSH 0.2.0-rc.2 elas vêm do preset (§17) | **Revertido**; o `verify` impede a volta |
+| 7 | A compactação nunca age a 16k | `headroomTokens` padrão de 65.536 deixa o orçamento negativo (§27.1) | **Diagnosticado pelo código, não corrigido** |
+| 8 | A CPU chega a 85–100 °C em segundos de geração | Potência da GPU (~88 W) num resfriamento compartilhado (§18, §27.4) | **Contido pela trava térmica, não resolvido**; inferência suspensa até a manutenção física (§20, §24) |
+
+Modelo recomendado nesta máquina: `qwen3.5:9b` em todos os papéis (§22–§23).
 
 A conclusão errada que assumi no meio do caminho — *"o modelo local é incapaz"* — está demonstrada como falsa pelos dados da §6.
 
@@ -435,6 +446,8 @@ O ponto que atravessa todas elas: **o harness detecta repetição mas não pode 
 
 ## 11. Estado final do repositório
 
+> **Atualização (2026-10-06):** esta seção descreve o estado do primeiro dia. O estado atual está no `README.md` e em `make help`. Depois disso vieram: `config-ollama` (§15), `clean-workspace` (§16), `thermal-watch` / `thermal-status` / `thermal-bench` (§17, §20), o bloco gerenciado `dsh-preset-trim` (§26) e um `verify` bem mais amplo (contexto, personas, `toolFilter`, corte do preset).
+
 ### Makefile
 
 | Alvo | Função |
@@ -477,10 +490,10 @@ Registrado para não ser confundido com conclusão:
 - **Se `thresholds: [1,2,3]` faz o 8B sair do laço.** Não medido. Medir custa um agent loop completo — os 5 minutos e o calor da §9.1.
 - **Se a perda do contexto `approval:policy` contribui para o laço.** A correção `includeRuntimeContext: false` remove também o contexto que publica a política de aprovação (§8.5). O modelo passou a não saber que está em `workspace-write` com `ask`. A aplicação da decisão de aprovação não é afetada — só o conhecimento do modelo. **Não isolei a variável**, então não afirmo que seja causa nem que seja irrelevante. Para isolar: comparar `includeRuntimeContext: false` contra uma configuração que restaure apenas o contexto `approval:policy` via `suppressRuntimeContext()` escopado, e ver se o laço muda. Custa um agent loop.
 - **Se um plugin no `agent/pre-step` de fato interrompe o laço.** O contrato está documentado (§8.4) e a rejeição "opens no step", mas **nunca foi escrito nem testado**. É proposta, não resultado.
-- **Comportamento em GPU.** Nenhuma medição feita; toda inferência aqui foi em CPU.
+- ~~**Comportamento em GPU.** Nenhuma medição feita; toda inferência aqui foi em CPU.~~ **Superado:** a partir da §15 a inferência roda na RTX 2080 Max-Q (§16.4, §18, §22).
 - **Comportamento com `qwen2.5:latest`.** Um run deu timeout, outro não emitiu tool call. Sem dados suficientes.
-- **O `dsh web` interativo.** O UI exibe `Qwen3 8B` e o roster correto, mas nenhuma tarefa real foi concluída pela UI. Só via `dsh headless`.
-- **Qualquer tarefa além de "criar um arquivo".** O único cenário testado é o mais trivial possível. Tarefas com múltiplos arquivos, leitura e verificação quase certamente expõem a patologia da §7.3 mais cedo.
+- ~~**O `dsh web` interativo.**~~ **Superado:** a §15.10 concluiu uma tarefa pelo Swarm na UI web.
+- **Qualquer tarefa além de "criar um arquivo".** *Atualização: Truco (§16) e Hello World (§26.3) estouraram a janela ou foram cortados pelo calor; nenhuma tarefa de vários arquivos foi concluída até 2026-10-06.* O único cenário testado é o mais trivial possível. Tarefas com múltiplos arquivos, leitura e verificação quase certamente expõem a patologia da §7.3 mais cedo.
 
 ---
 
@@ -747,7 +760,7 @@ Atritos menores, sem efeito no resultado:
 ### 15.11 Ainda em aberto
 
 1. ~~Repetir com `qwen3.5:9b`~~ — feito, §15.10.
-2. **O Swarm aceita relatórios falsos.** O Architect declarou `PLAN.md` criado e a tarefa foi marcada `completed`. O plano padrão do Swarm não define contrato de evidência, então nada verifica o arquivo.
+2. **O Swarm aceita relatórios falsos** (confirmado pelo código, §27.6). O Architect declarou `PLAN.md` criado e a tarefa foi marcada `completed`. O plano padrão do Swarm não define contrato de evidência, então nada verifica o arquivo.
 3. **`web_search` continua quebrado** no setup local (§14.5).
 
 ### 15.12 Como isso foi verificado
@@ -1278,9 +1291,9 @@ Três projetos tocam partes do experimento:
 ### 25.2 O que o `dsh-tiny` faz e que se aplica aqui
 
 1. **Reduz as tools no perfil, não no Swarm.** Desliga as entradas `tool-*` com `disabled: true` no `cordis.patch.yml`: `tool-jobs`, `tool-skill`, `tool-goal`, `tool-subagent*`, `tool-workflow`, `tool-web`, `tool-pwsh` e `plan-mode`. De 14 famílias para 8 tools, `toolsTokens` caiu de 4.633 para 1.815. É uma saída para a janela de 16k (§16) que não depende do `toolFilter` quebrado do Swarm (§17).
-   - Não testado com o Swarm: o `subagent` é desligado lá, e não se sabe se o Swarm depende da *tool* ou só do *serviço* de subagentes. O `dsh-tiny` afirma que os serviços continuam ativos.
+   - ~~Não testado com o Swarm~~ **Respondido na §26.3:** com o grupo `delegation` removido do preset, o Swarm criou o Architect normalmente. Ele usa o *serviço* de subagentes, não a *tool*.
 2. **Desliga o thinking** com `reasoningEfforts: {off: none, high: high}` no modelo. Eles mediram 1m20s → 14s, e viram o thinking do Qwen entrar em laço, compatível com a §22.3.
-   - **Conflito:** o `JoblessJoe` afirma que essa via é ignorada pelo Ollama (#16240). Precisa de teste.
+   - **Conflito:** o `JoblessJoe` afirma que essa via é ignorada pelo Ollama (#16240). Pela documentação do Ollama, o `dsh-tiny` está certo (§27.2), mas falta confirmar na versão instalada.
 3. **Escreve no system prompt os parâmetros obrigatórios** de `bash` e `write` (`personaSuffix`). Viram o modelo omitir o `file_path` do `write` (o nosso `write {}` da §16) e preencher o `justification` do sandbox no lugar de `description`, o mesmo tipo de confusão da §15.4.
 4. **O campo `input` é obrigatório** nos modelos, ou o `read_image` fica desligado em silêncio. Não afeta este experimento.
 
@@ -1355,5 +1368,92 @@ A referência é o run "Hello World" das 23:39 (`run-muw2l42d-bnap`, sem o corte
 
 - O Builder com o corte: suspenso pelo calor, como o resto (§24).
 - As 7 `swarm_*` globais (~1,8k tokens); removê-las dos filhos exigiria mudar o plugin do Swarm.
-- Por que a compactação do preset não agiu antes do estouro (run das 23:39).
+- ~~Por que a compactação do preset não agiu antes do estouro~~ — explicado pelo código na §27.1.
 - As outras ideias da §25.4: thinking desligado e adaptador nativo com `num_ctx`.
+
+---
+
+## 27. Verificações sem geração (2026-10-06)
+
+Hipóteses em aberto que podiam ser resolvidas lendo código, documentação ou o estado da máquina, **sem rodar inferência** (inferência suspensa, §24). Cada item diz o grau de confirmação.
+
+### 27.1 Por que a compactação nunca age a 16k — explicado pelo código
+
+O preset `standard` inclui o `dsh-compaction-basic`, mas as sessões do Hello World (§26.3) bateram exatamente em 16.384 tokens sem compactar. Em `@deepseek-ai/dsh-compaction-basic/lib/index.js`:
+
+- `headroomTokens` tem padrão **65.536** (linha 63), `thresholdRatio` 0,8 e `retainRatio` 0,16;
+- o orçamento é `contextWindow − tokens reservados para a resposta − headroomTokens` (linhas 128–131);
+- com `contextWindow` 16.384, o resultado é **sempre negativo**, e o plugin lança `TargetPressureConfigError` ("leaving no pressure budget");
+- no gancho `agent/pre-step` (linhas 839–851), esse erro gera **um único aviso por modelo** ("step compaction failed: …; continuing the turn") e a compactação é pulada em todos os passos.
+
+**Conclusão:** com janelas pequenas, a compactação automática fica desligada em silêncio. O aviso não apareceu no log gravado em `dsh-trim.log`; o destino do logger não foi verificado.
+
+**Correção candidata (não aplicada):** um `headroomTokens` pequeno (p. ex. 2.048) na config do `compaction-basic` dentro do `config/preset-trim.patch.yml`. Exige teste com geração (§28).
+
+### 27.2 `reasoning_effort` pela rota OpenAI — documentação favorece o `dsh-tiny`
+
+- O `pi-ai` envia `reasoning_effort` na rota `openai-completions` (`@earendil-works/pi-ai/dist/api/openai-completions.js:635` e `:674`).
+- A [documentação de compatibilidade OpenAI do Ollama](https://github.com/ollama/ollama/blob/main/docs/api/openai-compatibility.mdx) lista `reasoning_effort` como suportado. Em modelos de thinking liga/desliga (o `qwen3.5:9b` declara `levels: false, true`), `"none"` pede `false`, ou seja, thinking desligado.
+- A [ollama#16240](https://github.com/ollama/ollama/issues/16240), citada pelo `JoblessJoe`, está aberta, mas trata de **parâmetros de template** (`preserve_thinking` via `chat_template_kwargs`), não de `reasoning_effort`.
+
+**Conclusão:** pela documentação atual, `reasoningEfforts: {off: none}` deve desligar o thinking. **Não confirmado** na versão instalada (0.34.3): a documentação é a do branch principal.
+
+### 27.3 Por que o `dsh-tiny` não viu truncamento — explicado pelo código do Ollama
+
+- A [documentação de contexto](https://github.com/ollama/ollama/blob/main/docs/context-length.mdx) dá o padrão por memória: **< 24 GiB → 4k**. Um Mac M4 de 16 GB cai nessa faixa, como esta RTX 2080 de 8 GB.
+- **Runner llama.cpp** (Linux/CUDA, o daqui): `llm/llama_server.go:314–320` corta o prompt em `contextShiftPromptLimit(NumCtx, nKeep)`, cerca de metade do `num_ctx`. Isso explica o `limit=2050` com contexto de 4096 da §15.2.
+- **Runner MLX** (Apple Silicon): `mlxrunner/runner.go:140` usa o máximo nativo do modelo (`MaxContextLength()`) e o KV cache cresce sob demanda (`mlxrunner/cache/kvcache.go:67`). Não há truncamento.
+
+**Conclusão:** os dois relatos estão certos, cada um para o seu runner. A leitura é do branch principal do Ollama, não da 0.34.3.
+
+### 27.4 Resfriamento compartilhado — consistente com as fontes
+
+- DMI: Razer **Blade 15 (2019)**, SKU **RZ09-02888G92**, placa CH20.
+- Análises descrevem **uma câmara de vapor sobre CPU e GPU**, com duas ventoinhas e um dissipador para cada uma ([KitGuru](https://www.kitguru.net/lifestyle/mobile/laptops/luke-hill/razer-blade-15-advanced-review-i7-10875h-rtx-2080-super-max-q/all/1/), descrevendo o modelo 2020). Segundo as análises do modelo 2019 ([Laptop Mag](https://www.laptopmag.com/reviews/laptops/razer-blade-15-2019), [Pocket-lint](https://www.pocket-lint.com/laptops/reviews/razer/147615-razer-blade-15-2019-review-with-rtx-2080/)), ele usa o mesmo conjunto de ventoinhas e câmara de vapor do 2018.
+
+**Conclusão:** consistente com o acoplamento medido na §18 (a CPU sobe 26 °C em 2 s quando a GPU vai a 88 W). **Não confirmado** por desmontagem do modelo exato.
+
+### 27.5 Modo persistente e trava de clock da GPU — inconclusivo
+
+Leitura em 2026-10-06, com a GPU ociosa (P8, 300 MHz, 12,7 W):
+
+- `Persistence Mode: Disabled`, mas o serviço **`nvidia-persistenced` está ativo** (`/usr/bin/nvidia-persistenced --user nvpd`). O "already Enabled" do `nvidia-smi -pm 1` do usuário (§18.3) provavelmente reflete o serviço. Não verificado.
+- A trava de clock (`-lgc 300,1200`) não aparece em nenhum campo legível com a GPU ociosa. Se ela persiste só se vê numa geração (o clock passar ou não de 1200 MHz).
+
+### 27.6 O Swarm aceita relatórios falsos — confirmado pelo código
+
+- Em `dsh-swarm-orchestrator/lib/dispatch/spawn.js`, `spawnTaskAgent` devolve sucesso quando o agente filho termina com `stopReason: "completed"`.
+- O **contrato de evidência** (arquivos que devem existir, comandos que devem passar) só entra no prompt e na checagem quando a tarefa o define (`context.evidence`).
+- O plano padrão (`plan` → `execute`) não define contrato. Assim, nada verifica o que o agente declara, e foi o que aconteceu na §15.9 (Architect declarou um `PLAN.md` que não existia).
+
+---
+
+## 28. Pendências
+
+O que falta para fechar as hipóteses deste relatório, separado pelo que bloqueia cada item.
+
+### 28.1 Exigem geração (suspensas até a manutenção física da §20)
+
+A sequência combinada (§20, §24) é: limpeza das ventoinhas e troca da pasta térmica, com `make thermal-bench LABEL=<passo>` depois de cada uma, comparando com a referência da §20.3.
+
+| # | Hipótese | Origem | Como verificar |
+|---|---|---|---|
+| 1 | O Builder conclui uma tarefa de vários arquivos com o corte de tools | §26.5 | Repetir o Hello World (§26.3) e conferir a sessão filha |
+| 2 | Um `headroomTokens` pequeno faz a compactação agir a 16k | §27.1 | Pôr o valor no `preset-trim` e procurar `compaction (step pressure)` no log |
+| 3 | `reasoningEfforts: {off: none}` desliga o thinking na 0.34.3 | §27.2 | Uma requisição curta: a resposta deve vir sem `reasoning` |
+| 4 | O adaptador nativo do `orzgithub` com `num_ctx` dispensa o `OLLAMA_CONTEXT_LENGTH` | §25.4 | Tool calls válidas e nenhum `truncating input prompt` no log |
+| 5 | KV q8_0 a 32k não piora as tool calls | §16.4 | Mesmo run a 16k f16 e a 32k q8_0 |
+| 6 | Um modelo de 3–4B esquenta menos por tarefa | §18.5 | `thermal-bench` com o modelo menor |
+| 7 | A trava de clock da GPU persiste entre usos | §27.5 | Clock máximo durante uma geração |
+| 8 | A trava térmica em 85 °C / 1 s segura um pico real | §24 | Um disparo com a trava apertada (o usuário manteve 90 °C / 2 s em 2026-10-06) |
+| 9 | `thresholds` e plugin no `agent/pre-step` contra o laço degenerado | §12 | Itens da era CPU com `qwen3:8b`; talvez sem sentido com o `qwen3.5:9b` na GPU |
+
+### 28.2 Fora do alcance desta máquina
+
+| Hipótese | Origem | O que seria preciso |
+|---|---|---|
+| Desempenho do `granite4.1:8b` inteiro na GPU | §23.5 | GPU com ≥ 12 GB |
+| Números reais na segunda máquina | §19 | Instalar o Ollama no i5-4210U e medir um modelo de ~1,7B |
+| Colibri com um modelo grande e tool calling | §21 | ≥ 32 GB de RAM e um ou dois NVMe rápidos |
+| Tirar as 7 `swarm_*` dos agentes filhos | §26.5 | Mudança no plugin `dsh-swarm-orchestrator` |
+| `web_search` no setup local | §14.5, §15.11 | Credencial `DEEPSEEK_API_KEY` ou outro provedor de busca |

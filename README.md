@@ -50,13 +50,13 @@ Resumo; os detalhes e as evidências estão no relatório.
 
 ## Estado atual
 
-**A inferência nesta máquina está suspensa** até a limpeza das ventoinhas e a troca da pasta térmica (§20, itens 2 e 3). Depois de cada passo, `make thermal-bench LABEL=<passo>` compara com a referência da §20.3. Os próximos testes de configuração estão na §26.5.
+**A inferência nesta máquina está suspensa** até a limpeza das ventoinhas e a troca da pasta térmica (§20, itens 2 e 3). Depois de cada passo, `make thermal-bench LABEL=<passo>` compara com a referência da §20.3. As verificações feitas sem gerar estão na §27; o que falta, e o que bloqueia cada item, está na §28.
 
 ## Estrutura
 
 ```
 Makefile                      instalação, configuração, testes e alvos térmicos
-report/experiments.md         relatório dos experimentos (§1–§26)
+report/experiments.md         relatório dos experimentos (§1–§28)
 config/preset-trim.patch.yml  corte das tools do preset standard (§26)
 scripts/seed-swarm-roster.mjs fixa o modelo dos papéis do Swarm e saneia personas e filtros
 scripts/thermal-guard.sh      trava térmica: status, check, watch e hook do Claude Code
