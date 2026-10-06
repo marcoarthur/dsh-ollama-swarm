@@ -1219,3 +1219,36 @@ Pontos de atenção:
 **Aplicado em 2026-10-05, ~23h20:** com o DSH parado, o fallback do Architect foi esvaziado no `duty-table.json` (backup `duty-table.json.bak-granite`), e os 4 papéis usam só o `qwen3.5:9b`. `make verify` OK. O Granite continua no catálogo do provider (`EXTRA_MODELS`), selecionável pelo dashboard.
 
 Ressalva geral: as conclusões de comportamento vêm de poucas sessões (3 do Granite e 4 do Qwen) com tarefas diferentes. Não é um benchmark controlado de qualidade.
+
+---
+
+## 24. Incidente — a CPU chegou a 100 °C com a trava ativa (2026-10-05, 23:26)
+
+### 24.1 Linha do tempo
+
+Fontes: o log do vigia (`~/.dsh/thermal-guard.log`), as notificações do monitor, o `events.jsonl` do Swarm e a sessão `2b5b35c6`.
+
+| Horário | Evento |
+|---|---|
+| 23:24:56 | Vigia ligado: parada em CPU 90 °C / GPU 85 °C, leitura a cada 2 s |
+| ~23:25 | O usuário sobe o DSH para um teste com o Qwen (fallback do Granite já removido, §23.5) |
+| 23:26:07 | O Swarm **reinicia a tarefa `execute` do run do Truco das 21:22** (`run-muvxpzly-69uw`), interrompido pela trava às 21:23 e às 21:28. Nenhum run novo foi criado. Não se sabe se o reinício foi automático ao subir o DSH ou um "retry" no painel |
+| 23:26:07–23:26:29 | Passo 1 do Builder (`qwen3.5:9b`, 16k): prefill de **10.612 tokens** + 143 de saída em 22 s; chama `read` |
+| 23:26:27 | Monitor: **AVISO, CPU 87 °C** |
+| 23:26:29 | Começa o passo 2 do Builder |
+| 23:26:35 | Vigia: **PARADA, CPU 100 °C**; encerra `dsh web` e `llama-server`. A tarefa falha com `child stopped: aborted` |
+| ~23:27 | CPU em 65 → 61 → 57 °C; nenhum processo de inferência restante |
+
+### 24.2 Por que a trava chegou tarde
+
+O vigia lê a temperatura a cada 2 s e só registra no log quando dispara, então as leituras entre 87 °C (23:26:27) e 100 °C (23:26:35) não existem. O padrão medido na §18 explica o salto: quando a GPU entra em geração, a CPU sobe vários graus por segundo (60 → 86 °C em 2 s na fase E). Uma leitura logo abaixo de 90 °C seguida de uma já em 100 °C é compatível com isso. Não verificado: não há registro das leituras intermediárias.
+
+100 °C é o TjMax deste i7-8750H. A CPU reduz a própria frequência nesse ponto para se proteger, então é improvável que um pico curto cause dano; mas é o que a trava existe para evitar.
+
+### 24.3 Lições
+
+- **Com parada em 90 °C e leitura a cada 2 s, a trava não tem margem nesta máquina.** Recomendado e **ainda não aplicado**: parada em **85 °C** e leitura a **cada 1 s**.
+- **Runs interrompidos voltam.** Um run do Swarm interrompido pela trava pode ser retomado ao subir o DSH, já reaquecendo a máquina. Antes de subir, conferir a aba do Swarm ou cancelar runs pendentes.
+- **Suspender a inferência nesta máquina** até os passos físicos da §20 (limpeza e pasta térmica). Todos os testes do dia, incluindo o caso mais leve (`qwen3.5:9b` a 16k, tudo na GPU), chegaram ao limite em segundos.
+
+O usuário suspendeu os testes após o incidente.
