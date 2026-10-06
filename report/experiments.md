@@ -1216,4 +1216,6 @@ Pontos de atenção:
    - Reduzir o contexto do Granite para caber na GPU (~8k) não resolve, porque o prompt fixo do DSH tem ~10,6k tokens (§16) e voltaria o truncamento da §15.
 3. O Granite poderia ser reavaliado numa GPU com ≥ 12 GB, onde caberia inteiro; seu desempenho com o modelo todo na GPU não foi medido.
 
+**Aplicado em 2026-10-05, ~23h20:** com o DSH parado, o fallback do Architect foi esvaziado no `duty-table.json` (backup `duty-table.json.bak-granite`), e os 4 papéis usam só o `qwen3.5:9b`. `make verify` OK. O Granite continua no catálogo do provider (`EXTRA_MODELS`), selecionável pelo dashboard.
+
 Ressalva geral: as conclusões de comportamento vêm de poucas sessões (3 do Granite e 4 do Qwen) com tarefas diferentes. Não é um benchmark controlado de qualidade.

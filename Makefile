@@ -55,8 +55,9 @@ OLLAMA_URL     := $(OLLAMA_HOST)/v1
 MODEL          := qwen3.5:9b
 MODEL_LABEL    := Qwen3.5 9B
 # Modelos adicionais no catálogo do provider (não são o padrão). Ficam
-# selecionáveis no Roster e servem de fallback — o Architect usa o
-# granite como fallback. Separados por espaço; o nome exibido é o id.
+# selecionáveis no Roster. O granite saiu do fallback do Architect: a 16k
+# não cabe na RTX 2080 e gera ~5× mais devagar (relatório §23).
+# Separados por espaço; o nome exibido é o id.
 EXTRA_MODELS   := granite4.1:8b
 # Tem que bater com OLLAMA_CONTEXT_LENGTH do serviço ollama: pela API
 # OpenAI-compatible o Ollama ignora este valor e usa o próprio num_ctx
