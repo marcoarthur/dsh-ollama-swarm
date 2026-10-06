@@ -42,13 +42,20 @@ Resumo; os detalhes e as evidências estão no relatório.
 - **`qwen2.5-coder` não serve para agentes** (§14). Ele emite as chamadas de ferramenta como texto, e nada é executado.
 - **A janela de 16k enche rápido** (§16). Só os schemas das 33 ferramentas custam ~7k tokens. Uma tarefa grande num único agente não cabe.
 - **O `toolFilter` do Swarm não funciona no DSH 0.2.0-rc.2** (§17). Ele tira `read`/`write`/`bash` do agente. O seed do roster remove qualquer filtro.
-- **Calor** (§17–§20). Num notebook com RTX 2080 Max-Q, a potência da GPU durante a geração (~88 W) leva a CPU a 85–90 °C em segundos. A trava térmica (`scripts/thermal-guard.sh`) existe por causa disso, e a §20 tem um plano de melhoria com benchmark reprodutível.
+- **Calor** (§17–§20, §24). Num notebook com RTX 2080 Max-Q, a potência da GPU durante a geração (~88 W) leva a CPU a 85–90 °C em segundos. Limite de potência e trava de clock na GPU não resolveram (§18). A trava térmica (`scripts/thermal-guard.sh`) existe por causa disso, e a §20 tem um plano de melhoria com benchmark reprodutível. Mesmo com a trava em 90 °C e leitura a cada 2 s, a CPU chegou a 100 °C uma vez (§24).
+- **`qwen3.5:9b` × `granite4.1:8b`** (§22–§23). O Qwen cabe inteiro na GPU a 16k (KV de 512 MiB, arquitetura híbrida) e gera ~37 tok/s em sessões reais. O Granite precisa de 2,5 GB de KV a 16k, põe 5 camadas na CPU e gera ~7 tok/s. Recomendação aplicada: Qwen em todos os papéis, sem fallback.
+- **Colibri não substitui o DSH** (§21). É um motor de inferência, no lugar do Ollama. Os modelos dele com tool calling pedem mais RAM do que esta máquina tem.
+- **Projetos parecidos** (§25). Nenhum combina DSH + Ollama local + Swarm. O [`dsh-tiny`](https://github.com/VMoonLightV/dsh-tiny) é o mais próximo e traz ideias ainda não testadas aqui: desligar as `tool-*` ociosas no perfil, desligar o thinking e escrever no system prompt os parâmetros obrigatórios de `bash`/`write`.
+
+## Estado atual
+
+**A inferência nesta máquina está suspensa** até a limpeza das ventoinhas e a troca da pasta térmica (§20, itens 2 e 3). Depois de cada passo, `make thermal-bench LABEL=<passo>` compara com a referência da §20.3. Os próximos testes de configuração estão listados na §25.4.
 
 ## Estrutura
 
 ```
 Makefile                      instalação, configuração, testes e alvos térmicos
-report/experiments.md         relatório dos experimentos (§1–§20)
+report/experiments.md         relatório dos experimentos (§1–§25)
 scripts/seed-swarm-roster.mjs fixa o modelo dos papéis do Swarm e saneia personas e filtros
 scripts/thermal-guard.sh      trava térmica: status, check, watch e hook do Claude Code
 scripts/thermal-bench.sh      benchmark térmico reprodutível (protocolo da §18)
