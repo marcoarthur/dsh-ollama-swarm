@@ -879,3 +879,64 @@ Sem `read`, `write` e `bash`, o modelo tentou delegar para subagentes (bloqueado
 Os processos são identificados pelo executável exato, nunca por texto na linha de comando. A primeira versão usava `pkill -f` e encerrou o shell do próprio agente duas vezes durante o teste, porque o comando citava "llama-server" e "dsh web". O mesmo teria acontecido com qualquer terminal ou editor do usuário. No Node 24 o `comm` do DSH aparece como `MainThread`, por isso o filtro usa o argv.
 
 **Testado** com o limite baixado para 50 °C: encerrou o `llama-server` real (ocioso) e um processo falso `node …/bin/dsh web`, sem tocar em mais nada. **Não testado:** um disparo real, com a máquina quente durante um run.
+
+---
+
+## 18. Adendo — investigação do aquecimento (2026-10-05, 21:19–22:02)
+
+### 18.1 Contexto
+
+Com a trava térmica da §17.5 ativa, o usuário rodou o Truco manualmente duas vezes:
+
+| Horário | Limite da trava | Resultado |
+|---|---|---|
+| 21:19–21:23 | CPU 90 °C | Aviso a 87 °C; **PARADA a 90 °C** às 21:23:20, cerca de 4 min depois. Encerrados `llama-server` e `dsh web` |
+| 21:25–21:28 | CPU 96 °C (a pedido do usuário) | **PARADA a 99 °C** às 21:28:50. O aviso de 93 °C não chegou a disparar: a temperatura passou de < 93 °C para 99 °C entre duas leituras de 2 s |
+
+Em ambos, depois da parada, a CPU caiu para ~60 °C em 10–15 s, e nenhum processo de inferência sobrou. **A trava funcionou nas duas vezes.** Com limite de 96 °C, a margem foi de 1 °C até o crítico, e o limite voltou para 90 °C.
+
+### 18.2 Método
+
+Geração direta na API do Ollama (`/api/generate`), sem DSH e sem painel. Mesmo prompt (módulo Perl do Truco), `num_ctx` 16384, `think: false`. Amostras a cada 2 s de: temperatura da CPU e da GPU (`thermal-guard.sh status`), uso, potência e clock da GPU (`nvidia-smi`) e processos acima de 3% de CPU (`top`). Cada fase tinha uma trava própria que abortava a geração a 85 °C, além do vigia a 90 °C. Cada fase só começou com a CPU ≤ 60 °C.
+
+### 18.3 Resultados
+
+| Fase | Configuração | Potência da GPU gerando | `llama-server` (CPU) | Temperatura da CPU |
+|---|---|---|---|---|
+| A | Repouso, DSH parado | 12 W | não roda | 52–61 °C |
+| B | Ollama padrão | 86–90 W | **350%** | 72 → 87 °C em 16 s |
+| C | `num_thread: 2` | 88 W | 65% | 76 → 86 °C em 2 s |
+| D | GPU travada em 1200 MHz (`nvidia-smi -lgc 300,1200`) | 82–84 W | 350% | 74 → 90 °C em ~10 s |
+| E | 1200 MHz + `num_thread: 2` | 88 W, a **1410 MHz** (trava perdida) | **55%** | **60 → 86 °C em 2 s** |
+
+Observações:
+
+- **No repouso, o Chrome consumia ~150% de CPU** e mantinha a GPU em ~24% de uso, mesmo com o DSH parado. Nas fases D e E caiu para ~25–40%; não se sabe o que mudou.
+- **O `llama-server` usa ~3,5 núcleos com o modelo inteiro na GPU.** O consumo começa junto com a geração; na leitura do prompt fica em 50–77%. É compatível com threads de CPU em espera ativa do llama.cpp. `num_thread: 2` reduz isso para ~55–65%.
+- **Uma recarga do modelo levou a CPU a 91 °C** (21:34:01, ao trocar `num_thread`). O vigia, com leitura a cada 2 s, **não pegou** esse pico: o log não registra parada. A trava não protege contra picos de menos de ~2 s.
+- **O limite de potência não é suportado nesta GPU:** `nvidia-smi -pl 55` respondeu *"Changing power management limit is not supported"* (RTX 2080 Max-Q, driver 550.163.01; limite fixo de 90 W).
+- **A trava de clock (`-lgc`) foi aceita, mas não durou:** na fase E a GPU chegou a 1410 MHz. Hipótese não verificada: com `Persistence Mode: Disabled`, o driver reinicia quando a GPU fica ociosa e descarta a trava. O `nvidia-smi -pm 1` do usuário respondeu "already Enabled", mas a leitura seguinte mostrava `Disabled`; essa discrepância não foi explicada.
+- **Mesmo valendo, a trava de clock quase não reduz o consumo:** de 2100 para 1200 MHz, a potência caiu só de ~89 para ~83 W. É compatível com a geração ser limitada pela memória (que segue em 6001 MHz), mas o consumo da memória não foi medido em separado.
+
+### 18.4 Conclusão
+
+**O que esquenta a CPU é a potência da GPU, não a carga da própria CPU.** Na fase E, o `llama-server` ficou em ~55% de CPU e a temperatura da CPU subiu 26 °C em 2 s, exatamente quando a GPU foi de 31 W para 88 W. O mesmo acoplamento aparece em B, C e D. A explicação mais provável é refrigeração compartilhada entre CPU e GPU no notebook. É inferência a partir do padrão; a construção física não foi verificada.
+
+Nenhum ajuste de software disponível reduziu a potência da GPU de forma relevante:
+
+- o limite de potência não é suportado;
+- a trava de clock não persiste e, mesmo valendo, corta ~7%;
+- menos threads não ajudam.
+
+**Nesta máquina, com `qwen3.5:9b` na GPU, qualquer geração contínua leva a CPU a 86–90 °C em 2 a 16 segundos.** O Truco não é viável aqui sem mudança de hardware ou de onde o modelo roda.
+
+### 18.5 Opções restantes (nenhuma aplicada)
+
+| Opção | Observação |
+|---|---|
+| Base refrigerada, limpeza das ventoinhas, pasta térmica | Ataca o gargalo identificado |
+| Modelo menor (3–4B) | A GPU provavelmente continua no teto enquanto gera, mas cada resposta termina mais rápido; não medido. Pode piorar o uso de tools |
+| Rodar o Ollama em outra máquina e apontar o `baseURL` para ela | Tira o calor do notebook |
+| Vigia com leitura a cada 1 s | Reduz a janela cega da §18.3 |
+
+**Estado deixado:** a GPU está com a trava de clock aplicada pelo usuário; para desfazer, `sudo nvidia-smi -rgc`. Limite da trava térmica de volta em 90 °C, igual à versão commitada.
