@@ -1252,3 +1252,49 @@ O vigia lê a temperatura a cada 2 s e só registra no log quando dispara, entã
 - **Suspender a inferência nesta máquina** até os passos físicos da §20 (limpeza e pasta térmica). Todos os testes do dia, incluindo o caso mais leve (`qwen3.5:9b` a 16k, tudo na GPU), chegaram ao limite em segundos.
 
 O usuário suspendeu os testes após o incidente.
+
+---
+
+## 25. Pesquisa — projetos parecidos no GitHub (2026-10-06)
+
+Pergunta do usuário: existe no GitHub algum repositório com experimento parecido, DSH + Ollama local + Swarm para programação?
+
+**Método:** `gh search repos` (termos: "dsh ollama", "deepseek harness ollama", "dsh-swarm-orchestrator", "dsh swarm local", "cordis dsh"); `gh search code` (`11434` em `cordis.patch.yml`, `includeRuntimeContext ollama`, `dsh-swarm-orchestrator` em `package.json`); `gh search issues` em `deepseek-ai/deepseek-harness` e `linkbag/dsh-swarm-orchestrator` (Ollama, `num_ctx`, truncamento, `toolFilter`). Leitura dos READMEs e de trechos de código via `gh api`. **Nada foi instalado nem executado.**
+
+### 25.1 Resultado
+
+**Nenhum repositório encontrado combina DSH + Ollama local + Swarm para programação.** Também não há issues relatando o truncamento por `num_ctx` (§15) ou o `toolFilter` que tira as tools (§17).
+
+A maioria dos plugins "dsh-ollama" é para o **Ollama Cloud** (`pd90506`, `llt22`, `Asheblog`, `Kosello`, `valkytie`). O `zhuchuovo/dsh-swarm-orchestrator` é outro orquestrador, sem foco em execução local.
+
+Três projetos tocam partes do experimento:
+
+| Repositório | O que é | Relação com este experimento |
+|---|---|---|
+| [VMoonLightV/dsh-tiny](https://github.com/VMoonLightV/dsh-tiny) (push 2026-10-05) | Perfis do DSH para **modelos pequenos no Ollama local** (2–8B), como agente de programação, com relatório de avaliação (`profiles/local/docs/LOCAL-MODEL-EVAL.md`) | **O mais próximo.** Não usa Swarm: desliga subagent e workflow porque os modelos falharam em raciocínio de vários passos (0/2). Medido num Apple M4 com modelos MLX |
+| [orzgithub/dsh-ollama](https://github.com/orzgithub/dsh-ollama) (v0.1.2) | Adaptador para a **API nativa** do Ollama (`/api/chat`), configurável pela UI | **Envia `num_ctx` em `options` por requisição** quando configurado (`lib/adapter.js:480`) e usa o valor como `contextWindow`, o que evitaria o truncamento da §15 sem mexer no serviço |
+| [JoblessJoe/dsh-llm-ollama-native](https://github.com/JoblessJoe/dsh-llm-ollama-native) | Outro adaptador nativo, focado em controlar o raciocínio (`think`) | Afirma que a rota OpenAI-compatible ignora os campos de raciocínio ([ollama#16240](https://github.com/ollama/ollama/issues/16240)). **Não** envia `num_ctx` (sem ocorrência no código) |
+
+### 25.2 O que o `dsh-tiny` faz e que se aplica aqui
+
+1. **Reduz as tools no perfil, não no Swarm.** Desliga as entradas `tool-*` com `disabled: true` no `cordis.patch.yml`: `tool-jobs`, `tool-skill`, `tool-goal`, `tool-subagent*`, `tool-workflow`, `tool-web`, `tool-pwsh` e `plan-mode`. De 14 famílias para 8 tools, `toolsTokens` caiu de 4.633 para 1.815. É uma saída para a janela de 16k (§16) que não depende do `toolFilter` quebrado do Swarm (§17).
+   - Não testado com o Swarm: o `subagent` é desligado lá, e não se sabe se o Swarm depende da *tool* ou só do *serviço* de subagentes. O `dsh-tiny` afirma que os serviços continuam ativos.
+2. **Desliga o thinking** com `reasoningEfforts: {off: none, high: high}` no modelo. Eles mediram 1m20s → 14s, e viram o thinking do Qwen entrar em laço, compatível com a §22.3.
+   - **Conflito:** o `JoblessJoe` afirma que essa via é ignorada pelo Ollama (#16240). Precisa de teste.
+3. **Escreve no system prompt os parâmetros obrigatórios** de `bash` e `write` (`personaSuffix`). Viram o modelo omitir o `file_path` do `write` (o nosso `write {}` da §16) e preencher o `justification` do sandbox no lugar de `description`, o mesmo tipo de confusão da §15.4.
+4. **O campo `input` é obrigatório** nos modelos, ou o `read_image` fica desligado em silêncio. Não afeta este experimento.
+
+### 25.3 Onde divergem
+
+O `dsh-tiny` conclui que o Ollama **não** trunca prompts longos: com `ollama ps` mostrando `CONTEXT 4096`, um prompt de ~14–18k tokens foi processado inteiro. Aqui, no Linux com CUDA (Ollama 0.34.3), o log mostrou o truncamento diretamente (§15.2: `truncating input prompt limit=2050 prompt=8707`). A diferença provavelmente está no runner que o Ollama usa (MLX no Mac contra llama.cpp aqui), mas isso não foi verificado.
+
+### 25.4 Próximos passos possíveis (nenhum aplicado)
+
+Cada item exige teste com geração e fica suspenso até os passos físicos da §20 (§24):
+
+| Item | Validação necessária |
+|---|---|
+| Desligar as `tool-*` ociosas no perfil `web` | Confirmar na sessão filha a lista de tools recebida e que o Swarm ainda despacha agentes (o método da §17) |
+| `reasoningEfforts: {off: none}` no `qwen3.5:9b` | Confirmar que a resposta vem sem `reasoning` (resolve o conflito da §25.2) |
+| Dicas de parâmetros de `bash`/`write` no `personaSuffix` | Menos erros de argumento em sessões do Swarm |
+| Adaptador nativo do `orzgithub` com `num_ctx` | Alternativa ao `OLLAMA_CONTEXT_LENGTH` no serviço; conferir as tool calls e o log do Ollama sem `truncating` |
