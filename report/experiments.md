@@ -1048,3 +1048,52 @@ CSV: `~/.dsh/thermal-bench/20261005-222849-antes.csv`. Partida a 51 °C; vigia a
 - As amostras saíram a cada ~3–4 s, não 2 s: cada uma inclui 1 s de `top`.
 
 **Métrica a bater nos próximos passos:** mais de ~7 s de geração até 85 °C, ou estabilizar abaixo de 85 °C.
+
+---
+
+## 21. Avaliação — Colibri no lugar do Ollama? (2026-10-05, ~23h)
+
+Pergunta do usuário: vale tentar o [Colibri](https://github.com/JustVugg/colibri) em vez do DSH?
+
+Fontes: o README e o `docs/api.md` do repositório, lidos via `gh api` no dia (Apache-2.0, ~39,8k estrelas, último push em 2026-10-05). **Nada foi instalado nem executado.**
+
+### 21.1 O que o Colibri é
+
+Um **motor de inferência** em C puro, sem dependências: substituto do **Ollama**, não do DSH. Não tem loop de agente, ferramentas próprias, Swarm nem papéis.
+
+Ele roda modelos MoE de 125B a 2,8T parâmetros tratando VRAM, RAM e NVMe como uma única hierarquia: as partes do modelo ("experts") são lidas do disco sob demanda.
+
+Expõe uma API compatível com a da OpenAI (`/v1/chat/completions`, via `openai_server.py`). A combinação possível seria, então, **DSH + Colibri** no lugar de DSH + Ollama.
+
+### 21.2 Requisitos contra esta máquina
+
+O DSH depende de tool calling. Pela matriz do `docs/api.md`, só três motores aceitam `tools`:
+
+- **aceitam:** GLM-5.2, DeepSeek V4 e Kimi K3;
+- **recusam** com HTTP 400: Inkling, Qwen3.8-Flash-Next e OLMoE;
+- o Qwen3.6-35B-A3B não aparece na matriz.
+
+| Modelo com tools | Disco | RAM | Cabe aqui? |
+|---|---|---|---|
+| GLM-5.2 | ~372 GB | 16 GB mín., 24 GB confortável | Não: disco e RAM |
+| DeepSeek V4 Flash | ~167 GB (REAP 150B: ~85 GB) | 16 GB mín., 32 GB confortável | Disco sim; **RAM abaixo do mínimo** |
+| Kimi K3 | ~1,6 TB | 32 GB+ | Não |
+
+Esta máquina: 15 GB de RAM, 235 GB livres em `/home`, um único NVMe (LITEON CA3-8D512), RTX 2080 Max-Q 8 GB. Turing é suportada (`CUDA_ARCH=portable-pre-ampere NO_TC=1`).
+
+### 21.3 Velocidade publicada
+
+Para o DeepSeek V4 numa RTX 5080 com 2 NVMe: prefill de 3.324 tokens em 90 s, primeiro turno de 8,3k tokens em ~4 min, decode de ~1,6 tok/s com 3k de contexto. Turnos e sessões seguintes começam em 6–9 s graças ao cache de prefixo. Isso ajudaria o DSH, cujo system prompt e schemas se repetem em cada agente (§16).
+
+Nesta máquina, com GPU mais fraca e um só NVMe, provavelmente seria mais lento. Não medido.
+
+### 21.4 Conclusão
+
+**Não recomendado nesta máquina:**
+
+1. Não substitui o DSH, só o Ollama.
+2. O único modelo com tools que cabe no disco (DeepSeek V4 Flash) pede mais RAM que os 15 GB disponíveis.
+3. Mesmo rodando, cada agente geraria a ~1 tok/s ou menos.
+4. Transformaria cada tarefa em horas de carga contínua de CPU, GPU e disco, numa máquina que chega a 85 °C em ~7 s de geração (§20.3).
+
+**Onde faria sentido:** uma máquina com ≥ 32 GB de RAM e um ou dois NVMe rápidos, para testar se um modelo muito maior que o `qwen3.5:9b` faz tool calling com mais confiabilidade, aceitando a lentidão. Aqui, a prioridade continua sendo o plano térmico (§20).
