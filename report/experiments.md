@@ -1026,4 +1026,25 @@ Duas métricas, sempre partindo de ≤ 60 °C:
 
 Sequência sugerida de rótulos: `antes`, `ambiente`, `limpeza`, `pasta`, `base`. Um passo por vez, para atribuir o ganho a cada um.
 
-O script foi testado só sem geração (Ollama inexistente na porta 1): a espera, a amostragem, o CSV e o caminho de abortar funcionaram. **Ainda não rodou com geração real.**
+O script foi testado primeiro sem geração (Ollama inexistente na porta 1): a espera, a amostragem, o CSV e o caminho de abortar funcionaram.
+
+### 20.3 Referência: `antes` (2026-10-05 22:28, nenhuma melhoria aplicada)
+
+CSV: `~/.dsh/thermal-bench/20261005-222849-antes.csv`. Partida a 51 °C; vigia a 90 °C ativo.
+
+| t (s) | CPU | GPU | Uso da GPU | W | MHz | `llama-server` |
+|---|---|---|---|---|---|---|
+| 2 | 73 | 47 | 9% | 31 | 990 | 57% |
+| 6 | 58 | 47 | 11% | 31 | 990 | 54% |
+| 9 | 64 | 48 | 7% | 31 | 990 | 246% |
+| 12 | 81 | 52 | 82% | 89 | 1320 | 350% |
+| 16 | 84 | 54 | 83% | 89 | 1335 | 354% |
+| 19 | **85** | 56 | 84% | 90 | 1320 | 349% |
+
+**Resultado: abortou a 85 °C, 19 s após o início e ~7 s depois de a GPU entrar em geração (t = 12 s).** Não completou nenhuma resposta, então não há tok/s.
+
+- O pico de 73 °C em t = 2 s é a carga do modelo; a CPU volta a 58 °C antes da geração.
+- A GPU ficou em 1320–1335 MHz, acima do teto de 1200 MHz do `-lgc` aplicado às 21:55. Então a trava de clock **não estava valendo**; a referência é com a GPU no comportamento padrão (limite de 90 W).
+- As amostras saíram a cada ~3–4 s, não 2 s: cada uma inclui 1 s de `top`.
+
+**Métrica a bater nos próximos passos:** mais de ~7 s de geração até 85 °C, ou estabilizar abaixo de 85 °C.
