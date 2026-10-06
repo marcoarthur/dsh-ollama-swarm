@@ -1097,3 +1097,123 @@ Nesta máquina, com GPU mais fraca e um só NVMe, provavelmente seria mais lento
 4. Transformaria cada tarefa em horas de carga contínua de CPU, GPU e disco, numa máquina que chega a 85 °C em ~7 s de geração (§20.3).
 
 **Onde faria sentido:** uma máquina com ≥ 32 GB de RAM e um ou dois NVMe rápidos, para testar se um modelo muito maior que o `qwen3.5:9b` faz tool calling com mais confiabilidade, aceitando a lentidão. Aqui, a prioridade continua sendo o plano térmico (§20).
+
+---
+
+## 22. Modelo — `qwen3.5:9b`
+
+Fontes: `ollama show`, os logs do Ollama, as medições da §16.4 e as sessões do Swarm já registradas. **Nenhuma geração nova foi feita para esta seção.** Uma tentativa de teste com o Granite abortou a 89 °C no carregamento do modelo (§23.1), e o usuário optou por usar só os dados existentes.
+
+### 22.1 Ficha
+
+| Item | Valor |
+|---|---|
+| Parâmetros / quantização / tamanho | 9,7B · Q4_K_M · 6,6 GB no disco |
+| Capacidades (`ollama show`) | completion, **tools**, **vision**, **thinking** (ligado por padrão) |
+| Contexto nativo | 262.144 |
+| Arquitetura | híbrida: só **8 das 32 camadas** têm KV cache (o resto é recorrente) |
+| KV cache a 16k | **512 MiB** (f16); a 32k, 1.024 MiB (f16) ou 544 MiB (q8_0) — §16.4 |
+| Ocupação da GPU a 16k | **34/34 camadas na GPU**, 5,9 GB (inclui o projetor de visão) |
+| A 32k (f16) | 33/34 camadas; ~0,8 GB vai para a CPU (§16.4) |
+
+### 22.2 Desempenho medido
+
+| Medida | Valor | Fonte |
+|---|---|---|
+| Leitura do prompt (prefill) | 1.150–1.700 tok/s | §16.4, prompt de 8k e 19k |
+| Geração, benchmark isolado | **43,7 tok/s** (16k) · 39,7 (32k q8_0) · 34,4 (32k f16) | §16.4 |
+| Geração em sessões reais do Swarm | **36,5–37,6 tok/s** | `cfa51cc2`, `faf54348`, `bf787005`; passos sem prefill grande |
+| 1º passo de um agente (prefill ~9k + saída) | 9,5–29,5 s | mesmas sessões |
+| Calor | geração leva a CPU a 85 °C em ~7 s (§20.3); a carga do modelo dá um pico de ~73–91 °C | §18, §20.3 |
+
+### 22.3 Comportamento como agente
+
+| Run | Resultado |
+|---|---|
+| §15.1: contexto truncado em 2k | falhou (inventou a tool `pwd`); culpa do truncamento, não do modelo |
+| §15.10: `swarm-qwen-test.txt` | **sucesso limpo**: cada papel no seu escopo, 20 tool calls com 1 erro (write-before-read num arquivo antigo, recuperado), verificou bytes com `od -c`, resumo fiel |
+| §16: Truco (16k) | falhou por **estouro de janela** (`max-tokens`) depois de 1–2 arquivos; tool calls corretas, com erros esporádicos de argumento (`write {}` sem `file_path`/`content`; `todo_write` com `todos` como string) |
+
+Pontos de atenção:
+
+- **O thinking consome contexto e tempo:** o Builder da §15.10 gerou ~5,3k caracteres de raciocínio contra ~0,9k de texto. Desligar o thinking pelo DSH não foi testado.
+- Em contexto curto, segue bem o brief do Swarm e o relatório J10. Com contexto apertado, tende a errar argumentos.
+
+### 22.4 Recomendação
+
+**Modelo padrão nesta máquina**, para todos os papéis do Swarm:
+
+- cabe inteiro na GPU a 16k;
+- gera ~5× mais rápido que o Granite (§23);
+- teve o único run do Swarm limpo de ponta a ponta.
+
+Limites: tarefas que caibam em ~5–6k tokens de trabalho por agente (§16), e o calor (§20).
+
+---
+
+## 23. Modelo — `granite4.1:8b`
+
+Mesmas fontes da §22. **Sem geração nova** (ver §23.1).
+
+### 23.1 Tentativa de teste (abortada)
+
+Às 22:57:56 o Ollama iniciou o `llama-server` do Granite para o mesmo teste de velocidade da §16.4. Um segundo depois, o vigia registrou a **CPU a 89 °C**, e a trava do teste (85 °C) abortou antes de o prompt ser processado. O pico veio do **carregamento do modelo**, o mesmo fenômeno da §18 (91 °C numa recarga do Qwen). Por decisão do usuário, a comparação usa só dados existentes.
+
+### 23.2 Ficha
+
+| Item | Valor |
+|---|---|
+| Parâmetros / quantização / tamanho | 8,8B · Q4_K_M · 5,3 GB no disco |
+| Capacidades (`ollama show`) | completion, **tools**; sem thinking, sem visão |
+| Contexto nativo | 131.072 |
+| Arquitetura | atenção completa: **40 camadas com KV cache**, 8 cabeças KV × 128 |
+| KV cache a 16k | **2.560 MiB** (f16), 5× o do Qwen |
+| Ocupação da GPU a 16k | **36/41 camadas na GPU**; 825 MiB do modelo ficam na CPU (log de 17:30:17) |
+
+O KV de 2,5 GB não deixa o modelo caber nos 8 GB da RTX 2080 a 16k, e o Ollama manda 5 camadas para a CPU.
+
+### 23.3 Desempenho medido (só sessões reais)
+
+| Medida | Valor | Fonte |
+|---|---|---|
+| Geração em sessões reais do Swarm | **7,1–7,7 tok/s**, cerca de 5× mais lento que o Qwen | `4b1fddc4`, `9b6ff779`, `f0bb5ecf`; passos sem prefill grande |
+| 1º passo de um agente | 12,9 s (prefill 7,8k + 21 tok) a **162,6 s** (prefill 9,4k + 1.221 tok) | mesmas sessões |
+| Prefill isolado | não medido | — |
+| Calor | não medido em geração; carga do modelo levou a CPU a 89 °C | §23.1 |
+
+A lentidão é compatível com as 5 camadas na CPU, mas a causa não foi isolada: não houve teste com o modelo inteiro na GPU.
+
+### 23.4 Comportamento como agente
+
+| Run | Resultado |
+|---|---|
+| 16:19, contexto truncado em 2k | falhou como o Qwen: resumiu o runtime context em vez de agir |
+| §15.9: `swarm-qwen-test.txt` | arquivo final certo, mas o **Architect saiu do papel**: declarou ter criado o `PLAN.md` (nunca criado), criou ele mesmo o arquivo da tarefa com **conteúdo errado** e passou `sandbox_permissions` com `justification`. O Builder (também Granite) corrigiu: 6 tool calls, 3 erros, todos recuperados |
+| §16: plano do Truco (fallback do Architect) | **sucesso**: `PLAN.md` de 4,9 KB com arquitetura e ordem de integração; 7 tool calls, 3 erros (write-before-read ×2, `limit` inválido no `read`) |
+
+Pontos de atenção:
+
+- Não tem thinking, então gasta menos contexto por passo que o Qwen.
+- Nos runs observados, foi mais propenso a declarar trabalho não feito e a sair do escopo do papel. A amostra é pequena (3 sessões).
+
+### 23.5 Comparação e recomendação
+
+| | `qwen3.5:9b` | `granite4.1:8b` |
+|---|---|---|
+| Cabe na GPU a 16k | **sim** (34/34) | não (36/41) |
+| KV a 16k | 512 MiB | 2.560 MiB |
+| Geração em sessão real | **~37 tok/s** | ~7 tok/s |
+| Thinking | sim (custa contexto) | não |
+| Run limpo do Swarm | **sim** (§15.10) | não (Architect fora do papel, §15.9) |
+| Fez um plano grande sem estourar | não (§16) | **sim** (§16, como fallback) |
+
+**Recomendação:**
+
+1. **`qwen3.5:9b` como modelo de todos os papéis.**
+2. **Tirar o `granite4.1:8b` como fallback do Architect** nesta máquina:
+   - a 16k ele não cabe na GPU e gera ~5× mais devagar;
+   - cada troca de modelo no meio do run força uma recarga, e cada recarga é um pico de calor de ~90 °C (§23.1).
+   - Reduzir o contexto do Granite para caber na GPU (~8k) não resolve, porque o prompt fixo do DSH tem ~10,6k tokens (§16) e voltaria o truncamento da §15.
+3. O Granite poderia ser reavaliado numa GPU com ≥ 12 GB, onde caberia inteiro; seu desempenho com o modelo todo na GPU não foi medido.
+
+Ressalva geral: as conclusões de comportamento vêm de poucas sessões (3 do Granite e 4 do Qwen) com tarefas diferentes. Não é um benchmark controlado de qualidade.
