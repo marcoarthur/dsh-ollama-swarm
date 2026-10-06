@@ -940,3 +940,45 @@ Nenhum ajuste de software disponível reduziu a potência da GPU de forma releva
 | Vigia com leitura a cada 1 s | Reduz a janela cega da §18.3 |
 
 **Estado deixado:** a GPU está com a trava de clock aplicada pelo usuário; para desfazer, `sudo nvidia-smi -rgc`. Limite da trava térmica de volta em 90 °C, igual à versão commitada.
+
+---
+
+## 19. Adendo — avaliação da segunda máquina (2026-10-05, ~22h20)
+
+Pergunta do usuário: a outra máquina dele, descrita como "pior", pode rodar o Ollama?
+
+### 19.1 O que se sabe
+
+Fonte única: o `/proc/cpuinfo` colado pelo usuário. **Nada foi executado nessa máquina.**
+
+| Item | Valor |
+|---|---|
+| CPU | Intel Core i5-4210U (Haswell, 2014): 2 núcleos / 4 threads, 1,7 GHz base, classe de 15 W |
+| Instruções relevantes | **AVX2 e FMA** presentes; o llama.cpp tem caminho otimizado |
+| GPU | Não informada; provavelmente só integrada. O Ollama não a usaria |
+| RAM | **Não informada** |
+
+O prompt do terminal colado mostrava o hostname `ubaxala`, que é o desta máquina (i7-8750H, 12 threads, verificado). A listagem é de outra CPU, então foi tratada como da segunda máquina; a origem do prompt não foi esclarecida.
+
+### 19.2 Avaliação — estimativas, não medições
+
+O Ollama **roda** nela (x86_64 com AVX2). O que inviabiliza o uso com o DSH é a velocidade só em CPU:
+
+| | `qwen3.5:9b` (~6 GB) | Modelo de 1,7–4B (~1–2,5 GB) |
+|---|---|---|
+| Geração | ~1–2 tok/s | ~4–8 tok/s |
+| Leitura do prompt fixo do DSH (~10,6k tokens, §16) | **10–20 min** | **3–6 min** |
+
+Base das estimativas:
+
+- A geração em CPU é limitada pela banda de memória; DDR3L de canal duplo dá ~25 GB/s teóricos, divididos pelo tamanho do modelo.
+- A leitura do prompt é limitada pelo cálculo em 2 núcleos.
+- Para comparar, a RTX 2080 lê o mesmo prompt em ~8 s (§16.4).
+
+Cada agente do Swarm começa do zero com o prompt fixo, então um run levaria horas.
+
+**Calor:** a CPU é limitada a ~15 W, contra ~90 W da GPU desta máquina (§18), então gera muito menos calor. Mas notebooks dessa geração costumam rodar no limite térmico e reduzir o clock sob carga contínua, o que pioraria os números acima. Não medido.
+
+### 19.3 Conclusão
+
+Ela não serve para o DSH nem para o Swarm. Serve, no máximo, para testes curtos de tool calling com um modelo pequeno, fora do harness. Para fechar a avaliação, faltam a RAM e a GPU (`free -g; lspci | grep -iE "vga|3d"`); números reais exigem instalar o Ollama lá e medir um modelo pequeno com um prompt curto, com a trava térmica (§17.5) rodando junto.
