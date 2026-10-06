@@ -72,6 +72,11 @@ define NL
 endef
 EXTRA_MODEL_ENTRIES := $(foreach m,$(EXTRA_MODELS),$(NL)          - id: $(m)$(NL)            name: $(m)$(NL)            contextWindow: $(CONTEXT_WINDOW))
 
+# Corte da superfície de tools do preset `standard` (relatório §26): fonte
+# única em config/, aplicada como um segundo bloco gerenciado só no perfil
+# web (o preset não existe no headless).
+PRESET_TRIM    := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))config/preset-trim.patch.yml)
+
 # Drop-in systemd do Ollama gerenciado por este Makefile. O prefixo
 # zz- faz ele ser lido por último e prevalecer sobre o override.conf
 # que o `systemctl edit` cria.
@@ -270,7 +275,7 @@ set -euo pipefail
 file="$$1"
 mkdir -p "$$(dirname "$$file")"
 [ -f "$$file" ] || : > "$$file"
-kept="$$(awk '/^# >>> dsh-local-llm/{skip=1} /^# <<< dsh-local-llm/{skip=0; next} !skip' "$$file")"
+kept="$$(awk '/^# >>> dsh-local-llm/{skip=1} /^# <<< dsh-local-llm/{skip=0; next} !skip' "$$file" | cat -s)"
 {
 	if [ -n "$$kept" ]; then printf '%s\n\n' "$$kept"; fi
 	printf '%s\n' '$(BEGIN_MARK)'
@@ -280,6 +285,27 @@ kept="$$(awk '/^# >>> dsh-local-llm/{skip=1} /^# <<< dsh-local-llm/{skip=0; next
 mv "$$file.$$$$" "$$file"
 endef
 export PATCH_SCRIPT
+
+# Mesmo mecanismo do PATCH_SCRIPT, para um bloco lido de um arquivo, com
+# marcadores próprios (o awk de um bloco não toca no outro). Idempotente.
+#
+# Uso: bash -c "$$BLOCK_SCRIPT" _ <arquivo> <tag> <arquivo-fonte>
+define BLOCK_SCRIPT
+set -euo pipefail
+file="$$1"; tag="$$2"; src="$$3"
+[ -f "$$src" ] || { echo "ERRO: $$src não encontrado" >&2; exit 1; }
+mkdir -p "$$(dirname "$$file")"
+[ -f "$$file" ] || : > "$$file"
+kept="$$(awk -v t="$$tag" '$$0 ~ "^# >>> "t {skip=1} $$0 ~ "^# <<< "t {skip=0; next} !skip' "$$file" | cat -s)"
+{
+	if [ -n "$$kept" ]; then printf '%s\n\n' "$$kept"; fi
+	printf '# >>> %s >>>\n' "$$tag"
+	cat "$$src"
+	printf '# <<< %s <<<\n' "$$tag"
+} > "$$file.$$$$"
+mv "$$file.$$$$" "$$file"
+endef
+export BLOCK_SCRIPT
 
 # ------------------------------------------------------------
 # Credencial simbólica do Ollama.
@@ -377,6 +403,10 @@ config-provider:
 
 	@echo "==> Escrevendo o provider Ollama no perfil $(DSH_PROFILE)..."
 	@bash -c "$$PATCH_SCRIPT" _ "$(PROFILE_PATCH)"
+	@echo "   → $(PROFILE_PATCH)"
+
+	@echo "==> Aplicando o corte de tools do preset standard no perfil $(DSH_PROFILE) (§26)..."
+	@bash -c "$$BLOCK_SCRIPT" _ "$(PROFILE_PATCH)" dsh-preset-trim "$(PRESET_TRIM)"
 	@echo "   → $(PROFILE_PATCH)"
 
 	@echo "==> Escrevendo o provider Ollama no perfil headless (usado por test-dsh)..."
@@ -509,14 +539,21 @@ verify:
 	else \
 		echo "   AVISO: Roster do Swarm ausente (usa o padrão do deployment)"; \
 	fi; \
-	dsh --profile "$(DSH_PROFILE)" --dump-config >/dev/null 2>&1 \
+	dump="$$(dsh --profile "$(DSH_PROFILE)" --dump-config 2>/dev/null)" \
 		|| { echo "   ERRO: o DSH não consegue carregar o perfil $(DSH_PROFILE)"; ok=0; }; \
+	preset="$$(printf '%s\n' "$$dump" | awk '/^- id: preset-standard$$/{p=1; next} /^- id: /{p=0} p')"; \
+	if [ -z "$$preset" ]; then \
+		echo "   ERRO: preset-standard ausente no perfil $(DSH_PROFILE)"; ok=0; \
+	elif printf '%s\n' "$$preset" | grep -qE 'id: (delegation|tool-web|tool-jobs|tool-goal|planning)$$'; then \
+		echo "   ERRO: preset standard sem o corte de tools — o prompt fixo volta a ~9,6k tokens (§26; rode make config-provider)"; ok=0; \
+	fi; \
 	if [ $$ok -eq 1 ]; then \
 		echo "==> Verificação OK."; \
 		echo "   Rota:    ollama/$(MODEL)"; \
 		echo "   Default: ollama/$(MODEL)"; \
 		echo "   Roster:  architect/builder/reviewer/integrator → ollama/$(MODEL)"; \
 		echo "   Contexto: $(CONTEXT_WINDOW) (DSH e Ollama)"; \
+		echo "   Preset:  standard com o corte de tools (16 tools)"; \
 	else \
 		echo "==> Verificação FALHOU."; \
 		exit 1; \
@@ -730,7 +767,7 @@ clean:
 		for f in "$(PROFILE_PATCH)" "$(HEADLESS_PATCH)"; do \
 			[ -f "$$f" ] || continue; \
 			tmp="$$(mktemp)"; \
-			awk '/^# >>> dsh-local-llm/{skip=1} /^# <<< dsh-local-llm/{skip=0; next} !skip' "$$f" > "$$tmp"; \
+			awk '/^# >>> dsh-(local-llm|preset-trim)/{skip=1} /^# <<< dsh-(local-llm|preset-trim)/{skip=0; next} !skip' "$$f" > "$$tmp"; \
 			mv "$$tmp" "$$f"; \
 		done; \
 		rm -f "$(DUTY_TABLE)"; \

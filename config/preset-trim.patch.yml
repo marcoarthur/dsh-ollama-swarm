@@ -1,0 +1,62 @@
+# Corte da superfície de tools do preset `standard` (relatório §26).
+#
+# Aplicado pelo `make config-provider` como bloco gerenciado no perfil web
+# (ou avulso: dsh --profile web --patch config/preset-trim.patch.yml …).
+# No perfil web as tools vêm do preset do agente, não das entradas tool-* do topo
+# (que já vêm desligadas). Um patch em `config` substitui a config inteira, então a
+# lista `plugins` abaixo é a do preset de fábrica do DSH 0.2.0-rc.2 MENOS:
+#   tool-pwsh, tool-jobs, skill-filesystem, tool-skill, command-goal, tool-goal,
+#   planning (exit_plan_mode), delegation (subagent, subagent_fork, workflow,
+#   send_message, interrupt_agent, list_agents), tool-ask-user, tool-web.
+# Ideia e medidas originais: github.com/VMoonLightV/dsh-tiny (§25).
+# O persona ganha as dicas de parâmetros de bash/write (§25.2, item 3).
+- id: preset-standard
+  config:
+    id: standard
+    order: 1
+    plugins:
+      - id: persona
+        name: '@deepseek-ai/dsh-persona'
+        config:
+          prefix: You are a coding agent powered by the {{model}} model.
+          suffix: >-
+            Your working directory is {{cwd}}.
+            The bash tool takes two required parameters: "command" and "description".
+            Always send both; "description" is a 5-10 word summary of what the command does.
+            The write tool takes two required parameters: "file_path" and "content".
+            Send "file_path" first, then "content". Never omit either.
+      - id: agent-instructions
+        name: '@deepseek-ai/dsh-agent-instructions'
+        config:
+          maxBytes: 65536
+      - id: tool-bash
+        name: '@deepseek-ai/dsh-tool-bash'
+      - id: tool-fs
+        name: '@deepseek-ai/dsh-tool-fs'
+      - id: tool-fs-search
+        name: '@deepseek-ai/dsh-tool-fs-search'
+        config:
+          sampleOverCapGlobResults: false
+      - id: compaction
+        name: cordis:group
+        group: true
+        isolate:
+          compaction: true
+          toolResultPruner: true
+        config:
+          - id: compaction-basic
+            name: '@deepseek-ai/dsh-compaction-basic'
+          - id: command-compact
+            name: '@deepseek-ai/dsh-command-compact'
+          - id: tool-result-pruner
+            name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+            config:
+              thresholdChars: 8192
+              headChars: 4096
+              tailChars: 1024
+      - id: tool-todo
+        name: '@deepseek-ai/dsh-tool-todo'
+        config:
+          allowParallelInProgress: true
+      - id: present
+        name: '@deepseek-ai/dsh-tool-present'

@@ -1298,3 +1298,62 @@ Cada item exige teste com geração e fica suspenso até os passos físicos da �
 | `reasoningEfforts: {off: none}` no `qwen3.5:9b` | Confirmar que a resposta vem sem `reasoning` (resolve o conflito da §25.2) |
 | Dicas de parâmetros de `bash`/`write` no `personaSuffix` | Menos erros de argumento em sessões do Swarm |
 | Adaptador nativo do `orzgithub` com `num_ctx` | Alternativa ao `OLLAMA_CONTEXT_LENGTH` no serviço; conferir as tool calls e o log do Ollama sem `truncating` |
+
+---
+
+## 26. Corte da superfície de tools no preset `standard` (2026-10-06)
+
+Teste da primeira ideia da §25: reduzir os schemas de tools que todo agente recebe, para liberar a janela de 16k (§16).
+
+### 26.1 Onde as tools vêm no perfil web
+
+No perfil `web` as entradas `tool-*` do topo **já vêm com `disabled: true`**. As tools do agente vêm de dentro do **preset** ativo (`preset-standard`), uma lista aninhada `plugins`; os agentes do Swarm usam esse preset (`agentPreset: standard`).
+
+Como um patch em `config` substitui a config inteira (observação do `dsh-tiny`), a lista do preset foi reescrita sem as entradas ociosas:
+
+- **removidas:** `tool-pwsh`, `tool-jobs`, `skill-filesystem`, `tool-skill`, `command-goal`, `tool-goal`, o grupo `planning` (`exit_plan_mode`), o grupo `delegation` (`subagent`, `subagent_fork`, `workflow`, `send_message`, `interrupt_agent`, `list_agents`), `tool-ask-user` e `tool-web`;
+- **mantidas:** persona, `agent-instructions`, `tool-bash`, `tool-fs`, `tool-fs-search`, o grupo `compaction`, `tool-todo` e `present`;
+- o `personaSuffix` ganhou as dicas de parâmetros obrigatórios de `bash` e `write` (§25.2, item 3).
+
+**As 7 tools `swarm_*` continuam:** são globais, registradas pelo plugin do Swarm, e o preset não as alcança (~7,2k caracteres). Os agentes filhos só precisam do `swarm_report`.
+
+O alerta do `dsh-tiny` de que a entrada `system-prompt` do topo é ignorada no perfil web **não se aplica aqui**: as sessões do Qwen depois da §15.6 não têm o runtime context, então o `includeRuntimeContext: false` do topo funciona.
+
+### 26.2 Estimativa (sem geração)
+
+Com os schemas exatos da sessão `2feacbb7` e a razão de 3,97 caracteres por token calibrada nela (1º prompt de 10.612 tokens para 42.077 caracteres): tools de 33 para 16, de ~7.185 para ~3.900 tokens. **Economia estimada: ~3.300 tokens por requisição.**
+
+### 26.3 Teste ao vivo (08:54–08:55)
+
+O DSH foi iniciado com `--patch config/preset-trim.patch.yml`, com o vigia a 90 °C e o workspace arquivado antes. Tarefa: o `swarm-qwen-test.txt` da §15.
+
+A referência é o run "Hello World" das 23:39 (`run-muw2l42d-bnap`, sem o corte), rodado pelo usuário sem trava térmica. O Architect concluiu em 11 passos com 4 erros de tool, e o Builder **estourou os 16.384 tokens** nas duas tentativas, com 13 e 27 chamadas de `bash` (exploração do `perlbrew`/`cpanm`). O preset tem compactação (`compaction-basic`), mas ela não agiu antes do estouro.
+
+| | Antes (Architect, 23:39) | Com o corte (Architect, 08:55) |
+|---|---|---|
+| Tools recebidas (`request/header` da sessão) | 33 | **16**, exatamente as previstas |
+| System prompt | 6.046 caracteres | 4.419 caracteres |
+| **1º prompt** | **9.614 tokens** | **5.471 tokens (−43%)** |
+| Erros de tool | 4 em 11 passos | **0 em 5 passos** |
+
+- **A economia real (~4,1k tokens) superou a estimativa (~3,3k):** o system prompt também encolheu, porque perdeu as instruções das tools removidas.
+- A sobra de trabalho na janela de 16k sobe de ~6,8k para ~10,9k tokens.
+- **Validado de ponta a ponta** pela lista de tools no `request/header` da sessão filha (`9d5ea6d9`), não pela config: o método que faltou na §17.
+- O Architect escreveu o `PLAN.md`, chamou `swarm_report` e `bash` e gravou o relatório da tarefa, sem erros. Uma única sessão: pouco para conclusões sobre comportamento.
+
+**O Builder não chegou a rodar.** Às 08:55:46, cerca de 42 s depois do início do run, o vigia encerrou o DSH e o Ollama com a **CPU a 98 °C**. Avisos antes: 86 °C (08:55:13) e 88 °C (08:55:44). O corte reduz o tamanho de cada passo, mas não o calor: a GPU continua no teto enquanto gera (§18).
+
+### 26.4 Tornado permanente
+
+- **Fonte única:** `config/preset-trim.patch.yml`.
+- **`make config-provider`** aplica o arquivo como um segundo bloco gerenciado (`# >>> dsh-preset-trim >>>`), **só no perfil web**; o `preset-standard` não existe no `headless`. Backup do perfil: `cordis.patch.yml.bak-trim`.
+- **`make verify`** falha se o `preset-standard` composto ainda tiver `delegation`, `tool-web`, `tool-jobs`, `tool-goal` ou `planning`. Testado: falhou antes do corte e passou depois.
+- **`make clean`** remove os dois blocos gerenciados.
+- **Correção de idempotência:** com dois blocos no mesmo arquivo, cada regeneração deixava linhas em branco acumuladas onde o outro bloco estava. Os dois scripts passaram a comprimir linhas em branco seguidas (`cat -s`); três rodadas seguidas agora dão o mesmo arquivo, byte a byte.
+
+### 26.5 Ainda em aberto
+
+- O Builder com o corte: suspenso pelo calor, como o resto (§24).
+- As 7 `swarm_*` globais (~1,8k tokens); removê-las dos filhos exigiria mudar o plugin do Swarm.
+- Por que a compactação do preset não agiu antes do estouro (run das 23:39).
+- As outras ideias da §25.4: thinking desligado e adaptador nativo com `num_ctx`.
