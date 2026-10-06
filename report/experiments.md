@@ -949,16 +949,16 @@ Pergunta do usuário: a outra máquina dele, descrita como "pior", pode rodar o 
 
 ### 19.1 O que se sabe
 
-Fonte única: o `/proc/cpuinfo` colado pelo usuário. **Nada foi executado nessa máquina.**
+Fontes: `/proc/cpuinfo`, `free -g` e `lspci`, colados pelo usuário. **Nada foi executado por mim nessa máquina.**
 
 | Item | Valor |
 |---|---|
 | CPU | Intel Core i5-4210U (Haswell, 2014): 2 núcleos / 4 threads, 1,7 GHz base, classe de 15 W |
 | Instruções relevantes | **AVX2 e FMA** presentes; o llama.cpp tem caminho otimizado |
-| GPU | Não informada; provavelmente só integrada. O Ollama não a usaria |
-| RAM | **Não informada** |
+| GPU | Só a integrada, *Haswell-ULT Integrated Graphics Controller*; o Ollama não a usa |
+| RAM | **7 GB no total**, ~4 GB em uso e **~2 GB disponíveis** no momento da leitura; **sem swap** |
 
-O prompt do terminal colado mostrava o hostname `ubaxala`, que é o desta máquina (i7-8750H, 12 threads, verificado). A listagem é de outra CPU, então foi tratada como da segunda máquina; a origem do prompt não foi esclarecida.
+O prompt do terminal colado mostrava o hostname `ubaxala`, que é o desta máquina (i7-8750H, 12 threads, verificado). O comando foi rodado com `ue '…'`, que pelo contexto é um atalho do usuário para executar na segunda máquina; o prompt é o da máquina local.
 
 ### 19.2 Avaliação — estimativas, não medições
 
@@ -977,8 +977,16 @@ Base das estimativas:
 
 Cada agente do Swarm começa do zero com o prompt fixo, então um run levaria horas.
 
+**Memória — o fator decisivo:**
+
+- O `qwen3.5:9b` (~6 GB) **não cabe**. Com 7 GB no total e sem swap, carregá-lo levaria o kernel a matar processos por falta de memória.
+- Um modelo de 4B (~2,5 GB) não cabe nos ~2 GB livres sem fechar outros programas.
+- Só um modelo de ~1,7B (~1–1,4 GB em q4) cabe com folga.
+
+Esses tamanhos são os típicos desses modelos, não medidos nessa máquina.
+
 **Calor:** a CPU é limitada a ~15 W, contra ~90 W da GPU desta máquina (§18), então gera muito menos calor. Mas notebooks dessa geração costumam rodar no limite térmico e reduzir o clock sob carga contínua, o que pioraria os números acima. Não medido.
 
 ### 19.3 Conclusão
 
-Ela não serve para o DSH nem para o Swarm. Serve, no máximo, para testes curtos de tool calling com um modelo pequeno, fora do harness. Para fechar a avaliação, faltam a RAM e a GPU (`free -g; lspci | grep -iE "vga|3d"`); números reais exigem instalar o Ollama lá e medir um modelo pequeno com um prompt curto, com a trava térmica (§17.5) rodando junto.
+Ela não serve para o DSH nem para o Swarm: o modelo em uso não cabe na memória, e mesmo um de 1,7B levaria minutos só para ler o prompt fixo do harness. Serve, no máximo, para testes curtos de tool calling com um modelo de ~1,7B, fora do harness. Números reais exigiriam instalar o Ollama lá e medir, com a trava térmica (§17.5) rodando junto.
